@@ -1,0 +1,65 @@
+---
+- name: Create backup directory
+  ansible.windows.win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ jenkins_run_dir }}"
+    - "{{ jenkins_run_dir }}\\war"
+
+- name: Back up JENKINS_HOME (jobs, config, plugins, secrets)
+  community.windows.win_robocopy:
+    src: "{{ jenkins_home }}"
+    dest: "{{ jenkins_run_dir }}\\home"
+    recurse: true
+    flags: "{{ jenkins_robocopy_flags }} /XD {{ jenkins_backup_exclude_dirs | join(' ') }}"
+
+- name: Back up install dir (scripts, wrappers; WARs excluded)
+  community.windows.win_robocopy:
+    src: "{{ jenkins_install_dir }}"
+    dest: "{{ jenkins_run_dir }}\\install"
+    recurse: true
+    flags: "{{ jenkins_robocopy_flags }} /XF *.war"
+
+- name: Back up the WAR currently in use
+  ansible.windows.win_copy:
+    src: '{{ jenkins_install_dir }}\jenkins-{{ jenkins_current_version }}.war'
+    dest: "{{ jenkins_run_dir }}\\war\\"
+    remote_src: true
+  failed_when: false   # an older layout may not follow this naming; the manifest records it
+
+- name: Export Windows service definition (reference copy)
+  ansible.windows.win_command: >-
+    reg export "HKLM\SYSTEM\CurrentControlSet\Services\{{ jenkins_service_name }}" "{{ jenkins_run_dir }}\service.reg" /y
+  changed_when: true
+
+- name: Save plugin inventory
+  ansible.windows.win_copy:
+    content: "{{ jenkins_plugins_before | to_nice_json }}"
+    dest: "{{ jenkins_run_dir }}\\plugins-before.json"
+
+- name: Build manifest
+  ansible.builtin.set_fact:
+    jenkins_manifest:
+      run_id: "{{ jenkins_run_id }}"
+      host: "{{ inventory_hostname }}"
+      from_version: "{{ jenkins_current_version }}"
+      to_version: "{{ jenkins_target_version }}"
+      jenkins_home: "{{ jenkins_home }}"
+      install_dir: "{{ jenkins_install_dir }}"
+      startup_script: "{{ jenkins_startup_script }}"
+      service_name: "{{ jenkins_service_name }}"
+      old_war: '{{ jenkins_install_dir }}\jenkins-{{ jenkins_current_version }}.war'
+      new_war: "{{ jenkins_war_dest }}"
+      exclude_dirs: "{{ jenkins_backup_exclude_dirs }}"
+      java_home_new: "{{ jenkins_java_selected.home }}"
+      health_url: "{{ jenkins_health_url }}"
+
+- name: Write manifest LAST (its presence marks a complete backup)
+  ansible.windows.win_copy:
+    content: "{{ jenkins_manifest | to_nice_json }}"
+    dest: "{{ jenkins_run_dir }}\\manifest.json"
+
+- name: Backup complete
+  ansible.builtin.set_fact:
+    jenkins_backup_done: true

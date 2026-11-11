@@ -1,0 +1,43 @@
+---
+- name: Quiet down Jenkins and wait for running builds to finish
+  when:
+    - jenkins_quiet_down | bool
+    - jenkins_has_api_creds | bool
+    - _jenkins_svc.state == 'started'
+  block:
+    - name: Enter quiet-down mode (no new builds)
+      ansible.windows.win_uri:
+        url: "{{ jenkins_url }}/quietDown"
+        method: POST
+        url_username: "{{ jenkins_admin_user }}"
+        url_password: "{{ jenkins_admin_api_token }}"
+        force_basic_auth: true
+        validate_certs: "{{ jenkins_validate_certs }}"
+      no_log: "{{ jenkins_no_log }}"
+
+    - name: Wait for executors to become idle
+      ansible.windows.win_uri:
+        url: "{{ jenkins_url }}/computer/api/json?tree=busyExecutors"
+        url_username: "{{ jenkins_admin_user }}"
+        url_password: "{{ jenkins_admin_api_token }}"
+        force_basic_auth: true
+        validate_certs: "{{ jenkins_validate_certs }}"
+        return_content: true
+      register: _busy
+      until: (_busy.json.busyExecutors | default(0) | int) == 0
+      retries: "{{ ((jenkins_quiet_down_timeout | int) / (jenkins_quiet_down_delay | int)) | int }}"
+      delay: "{{ jenkins_quiet_down_delay }}"
+      failed_when: false
+      no_log: "{{ jenkins_no_log }}"
+
+    - name: Builds still running after timeout
+      ansible.builtin.assert:
+        that: (_busy.json.busyExecutors | default(0) | int) == 0 or (jenkins_quiet_down_force | bool)
+        fail_msg: "Builds are still running after {{ jenkins_quiet_down_timeout }}s and jenkins_quiet_down_force=false."
+        quiet: true
+      no_log: "{{ jenkins_no_log }}"
+
+- name: Warn when no drain was possible
+  ansible.builtin.set_fact:
+    jenkins_warnings: "{{ jenkins_warnings + ['Running builds were NOT drained (no API credentials or quiet-down disabled).'] }}"
+  when: not (jenkins_quiet_down | bool and jenkins_has_api_creds | bool)

@@ -1,0 +1,25 @@
+---
+# 1) Dry run first:   ansible-playbook upgrade.yml -e jenkins_plan_only=true
+# 2) Then for real:   ansible-playbook upgrade.yml
+- name: Upgrade Jenkins on Windows
+  hosts: jenkins_windows
+  gather_facts: false
+
+  vars:
+    jenkins_target_version: "2.544"          # or "2.541.3" (LTS)
+    jenkins_service_name: Jenkins_Server
+    jenkins_home: 'E:\Jenkins\home'          # <-- JENKINS_HOME (jobs/plugins/config.xml)
+    jenkins_install_dir: 'E:\Jenkins\server'
+    jenkins_startup_script: 'E:\Jenkins\server\start.jenkins.bat'
+    jenkins_backup_dir: 'E:\Jenkins_Backups'
+    jenkins_war_source_dir: '\\iodine\apps\COMPATIBL\Java'   # omit to download from get.jenkins.io
+    jenkins_url: 'http://localhost:8080'
+    jenkins_admin_user: svc_ansible
+    jenkins_admin_api_token: "{{ vault_jenkins_api_token }}"
+    # Air-gapped Java install example:
+    # jenkins_java_install_method: msi
+    # jenkins_java_msi_urls:
+    #   '21': '\\iodine\apps\Java\OpenJDK21U-jdk_x64_windows_hotspot_21.0.5_11.msi'
+
+  roles:
+    - role: jenkins_windows

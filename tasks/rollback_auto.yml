@@ -1,0 +1,19 @@
+---
+# Called from the rescue section of execute.yml.
+- name: Full rollback (backup exists)
+  ansible.builtin.include_tasks: restore.yml
+  vars:
+    jenkins_restore_dir: "{{ jenkins_run_dir }}"
+    jenkins_restore_manifest: "{{ jenkins_manifest }}"
+  when:
+    - jenkins_rollback_on_failure | bool
+    - jenkins_backup_done | default(false) | bool
+
+- name: Nothing to restore - just make sure the service is running again
+  ansible.windows.win_service:
+    name: "{{ jenkins_service_name }}"
+    state: started
+  failed_when: false
+  when:
+    - not (jenkins_backup_done | default(false) | bool)
+    - jenkins_stopped_by_role | default(false) | bool

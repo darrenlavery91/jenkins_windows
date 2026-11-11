@@ -1,0 +1,74 @@
+---
+- name: Work out which plugins to update
+  ansible.builtin.set_fact:
+    jenkins_plugins_to_update: >-
+      {{ jenkins_plugin_findings | selectattr('kind', 'equalto', 'update_available')
+         | map(attribute='name') | reject('in', jenkins_plugin_update_exclude) | list }}
+
+- name: Say why updates are skipped
+  ansible.builtin.set_fact:
+    jenkins_warnings: "{{ jenkins_warnings + ['Plugin updates skipped: jenkins_admin_user / jenkins_admin_api_token not provided.'] }}"
+  when:
+    - jenkins_update_plugins | bool
+    - not (jenkins_has_api_creds | bool)
+
+- name: Update plugins through the Jenkins CLI
+  when:
+    - jenkins_update_plugins | bool
+    - jenkins_has_api_creds | bool
+    - jenkins_plugins_to_update | length > 0
+  block:
+    - name: Download jenkins-cli.jar from the running controller
+      ansible.windows.win_get_url:
+        url: "{{ jenkins_url }}/jnlpJars/jenkins-cli.jar"
+        dest: "{{ jenkins_run_dir }}\\jenkins-cli.jar"
+        url_username: "{{ jenkins_admin_user }}"
+        url_password: "{{ jenkins_admin_api_token }}"
+        force_basic_auth: true
+        validate_certs: "{{ jenkins_validate_certs }}"
+      no_log: "{{ jenkins_no_log }}"
+
+    - name: Install / update plugins (dependencies resolved by Jenkins)
+      ansible.windows.win_command: >-
+        "{{ jenkins_java_selected.home }}\bin\java.exe" -jar "{{ jenkins_run_dir }}\jenkins-cli.jar"
+        -s {{ jenkins_url }} {{ jenkins_cli_extra_args }} install-plugin {{ jenkins_plugins_to_update | join(' ') }}
+      environment:
+        JENKINS_USER_ID: "{{ jenkins_admin_user }}"
+        JENKINS_API_TOKEN: "{{ jenkins_admin_api_token }}"
+      register: _cli
+      failed_when: false
+      no_log: "{{ jenkins_no_log }}"
+
+    - name: Record CLI outcome
+      ansible.builtin.set_fact:
+        jenkins_plugin_update_rc: "{{ _cli.rc | default(-1) }}"
+        jenkins_plugin_update_output: "{{ (_cli.stdout_lines | default([])) + (_cli.stderr_lines | default([])) }}"
+        jenkins_warnings: >-
+          {{ jenkins_warnings + (['Plugin update via CLI returned exit code ' ~ _cli.rc ~ ' (Jenkins may not reach the update center). See report.'] if (_cli.rc | default(-1) | int) != 0 else []) }}
+
+    - name: Restart Jenkins to activate the new plugin versions
+      ansible.windows.win_service:
+        name: "{{ jenkins_service_name }}"
+        state: restarted
+
+    - name: Wait for Jenkins after plugin restart
+      ansible.windows.win_uri:
+        url: "{{ jenkins_health_url }}"
+        validate_certs: "{{ jenkins_validate_certs }}"
+        status_code: "{{ jenkins_health_status_codes }}"
+      register: _health2
+      until: (_health2.status_code | default(0) | int) in jenkins_health_status_codes
+      retries: "{{ jenkins_health_retries }}"
+      delay: "{{ jenkins_health_delay }}"
+      failed_when: false
+
+    - name: Fail if Jenkins did not return after plugin updates
+      ansible.builtin.assert:
+        that: (_health2.status_code | default(0) | int) in jenkins_health_status_codes
+        fail_msg: "Jenkins did not come back after the plugin updates."
+        quiet: true
+
+    - name: Re-check failed plugins after updates
+      ansible.builtin.include_tasks: failed_plugins.yml
+      vars:
+        jenkins_failed_stage: final

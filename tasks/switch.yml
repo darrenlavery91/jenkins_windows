@@ -1,0 +1,19 @@
+---
+- name: Point startup script at the new WAR (and pinned Java)
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Set-JenkinsStartup.ps1') }}"
+    parameters:
+      ScriptPath: "{{ jenkins_startup_script }}"
+      WarFileName: "{{ jenkins_war_name }}"
+      JavaHome: "{{ jenkins_java_selected.home if (jenkins_java_pin_in_script | bool) else '' }}"
+      BackupCopy: "{{ jenkins_run_dir }}\\start-script.before"
+  register: _switch
+
+- name: Show startup script changes
+  ansible.builtin.debug:
+    var: _switch.result.diff
+
+- name: Remember script was patched
+  ansible.builtin.set_fact:
+    jenkins_script_patched: true
+    jenkins_script_diff: "{{ _switch.result.diff }}"

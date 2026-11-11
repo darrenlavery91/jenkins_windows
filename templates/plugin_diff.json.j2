@@ -1,0 +1,21 @@
+{#- Inputs: jenkins_plugins_before, jenkins_plugins_after_core (optional), jenkins_plugins_final -#}
+{%- set b = jenkins_plugins_before | items2dict(key_name='name', value_name='version') -%}
+{%- set c = (jenkins_plugins_after_core | default(jenkins_plugins_before)) | items2dict(key_name='name', value_name='version') -%}
+{%- set f = jenkins_plugins_final | items2dict(key_name='name', value_name='version') -%}
+{%- set ns = namespace(updated=[], added=[], removed=[], unchanged=0) -%}
+{%- for name, ver in f.items() -%}
+  {%- if name not in b -%}
+    {%- set ns.added = ns.added + [{'name': name, 'version': ver}] -%}
+  {%- elif b[name] != ver -%}
+    {%- set ns.updated = ns.updated + [{'name': name, 'from': b[name], 'to': ver,
+        'by': ('core upgrade' if c.get(name, b[name]) != b[name] else 'plugin update')}] -%}
+  {%- else -%}
+    {%- set ns.unchanged = ns.unchanged + 1 -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- for name, ver in b.items() -%}
+  {%- if name not in f -%}
+    {%- set ns.removed = ns.removed + [{'name': name, 'version': ver}] -%}
+  {%- endif -%}
+{%- endfor -%}
+{{ {'updated': ns.updated, 'added': ns.added, 'removed': ns.removed, 'unchanged': ns.unchanged} | to_json }}

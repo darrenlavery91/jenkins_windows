@@ -1,0 +1,40 @@
+---
+- name: Final plugin inventory
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsPlugins.ps1') }}"
+    parameters:
+      JenkinsHome: "{{ jenkins_home }}"
+    depth: 3
+  register: _plugins_final
+  changed_when: false
+
+- name: Compute plugin diff and remaining problems
+  ansible.builtin.set_fact:
+    jenkins_plugins_final: "{{ _plugins_final.output }}"
+    jenkins_plugin_diff: "{{ lookup('ansible.builtin.template', 'plugin_diff.json.j2') | from_json }}"
+  vars:
+    jenkins_plugins_final: "{{ _plugins_final.output }}"
+
+- name: Re-analyse the FINAL plugin set against the new core
+  ansible.builtin.set_fact:
+    jenkins_plugin_findings_after: "{{ lookup('ansible.builtin.template', 'plugin_analysis.json.j2') | from_json }}"
+  vars:
+    jenkins_analysis_plugins: "{{ _plugins_final.output }}"
+
+- name: Prune old backups (keep newest N)
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$Dir, [int]$Keep)
+      $all = @(Get-ChildItem -LiteralPath $Dir -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' -and (Test-Path (Join-Path $_.FullName 'manifest.json')) } | Sort-Object Name -Descending)
+      $old = @($all | Select-Object -Skip $Keep)
+      foreach ($d in $old) { Remove-Item -LiteralPath $d.FullName -Recurse -Force }
+      $Ansible.Changed = ($old.Count -gt 0)
+      $Ansible.Result = @{ removed = @($old | ForEach-Object { $_.Name }) }
+    parameters:
+      Dir: "{{ jenkins_backup_dir }}"
+      Keep: "{{ jenkins_backup_keep }}"
+  register: _prune
+
+- name: Mark success
+  ansible.builtin.set_fact:
+    jenkins_result: SUCCESS

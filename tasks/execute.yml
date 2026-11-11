@@ -1,0 +1,42 @@
+---
+- name: Upgrade Jenkins with automatic rollback
+  block:
+    - name: Stage and verify the WAR (no downtime yet)
+      ansible.builtin.include_tasks: stage_war.yml
+    - name: Ensure the right Java is installed
+      ansible.builtin.include_tasks: java.yml
+    - name: Quiet down and drain builds
+      ansible.builtin.include_tasks: quiesce.yml
+    - name: Stop Jenkins
+      ansible.builtin.include_tasks: stop.yml
+    - name: Back up
+      ansible.builtin.include_tasks: backup.yml
+    - name: Switch startup script to new WAR / Java
+      ansible.builtin.include_tasks: switch.yml
+    - name: Start and verify
+      ansible.builtin.include_tasks: start_verify.yml
+    - name: Update plugins
+      ansible.builtin.include_tasks: plugins_update.yml
+    - name: Finalise (inventory, diff, prune old backups)
+      ansible.builtin.include_tasks: finalize.yml
+
+  rescue:
+    - name: Remember why we failed
+      ansible.builtin.set_fact:
+        jenkins_result: FAILED
+        jenkins_failure_reason: "{{ ansible_failed_task.name | default('unknown task') }}: {{ ansible_failed_result.msg | default('no message') }}"
+
+    - name: Roll back automatically
+      ansible.builtin.include_tasks: rollback_auto.yml
+
+    - name: Fail the host after cleanup
+      ansible.builtin.fail:
+        msg: >-
+          Jenkins upgrade failed ({{ jenkins_failure_reason }}).
+          {{ 'Rolled back to ' ~ jenkins_current_version ~ ' - see ' ~ jenkins_run_dir
+             if (jenkins_rolled_back | default(false) | bool)
+             else 'NO rollback was performed (see report).' }}
+
+  always:
+    - name: Write report
+      ansible.builtin.include_tasks: report.yml

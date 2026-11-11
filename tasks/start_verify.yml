@@ -1,0 +1,72 @@
+---
+- name: Start the Jenkins service
+  ansible.windows.win_service:
+    name: "{{ jenkins_service_name }}"
+    state: started
+
+- name: Wait for Jenkins to answer
+  ansible.windows.win_uri:
+    url: "{{ jenkins_health_url }}"
+    method: GET
+    validate_certs: "{{ jenkins_validate_certs }}"
+    status_code: "{{ jenkins_health_status_codes }}"
+  register: _health
+  until: (_health.status_code | default(0) | int) in jenkins_health_status_codes
+  retries: "{{ jenkins_health_retries }}"
+  delay: "{{ jenkins_health_delay }}"
+  failed_when: false
+
+- name: Fail if Jenkins never became healthy
+  ansible.builtin.assert:
+    that: (_health.status_code | default(0) | int) in jenkins_health_status_codes
+    fail_msg: "Jenkins did not return one of {{ jenkins_health_status_codes }} at {{ jenkins_health_url }} within {{ (jenkins_health_retries | int) * (jenkins_health_delay | int) }}s."
+    quiet: true
+
+- name: Confirm the running version (X-Jenkins header)
+  ansible.builtin.assert:
+    that: _health.x_jenkins == jenkins_target_version
+    fail_msg: "Jenkins reports version {{ _health.x_jenkins }} but {{ jenkins_target_version }} was expected."
+    quiet: true
+  when:
+    - jenkins_verify_running_version | bool
+    - _health.x_jenkins is defined
+
+- name: Which java.exe / WAR is actually running?
+  ansible.windows.win_powershell:
+    script: |
+      $re = '-jar\s+"?[^\s"]*jenkins[^\s"]*\.war'
+      $p = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re })
+      $Ansible.Result = @{ procs = @($p | ForEach-Object { @{ exe = $_.ExecutablePath; cmd = $_.CommandLine } }) }
+  register: _running
+  changed_when: false
+
+- name: Assert the new WAR is what's running
+  ansible.builtin.assert:
+    that:
+      - _running.result.procs | length > 0
+      - _running.result.procs | map(attribute='cmd') | select('search', jenkins_war_name | regex_escape) | list | length > 0
+    fail_msg: "No java process is running {{ jenkins_war_name }}."
+    quiet: true
+
+- name: Warn when Java in use differs from the selected JDK
+  ansible.builtin.set_fact:
+    jenkins_warnings: "{{ jenkins_warnings + ['Running java.exe is ' ~ _running.result.procs[0].exe ~ ' but the role selected ' ~ jenkins_java_selected.home ~ '. Check the service wrapper (e.g. NSSM/WinSW) for its own JAVA_HOME/PATH.'] }}"
+  when: not (_running.result.procs[0].exe | lower).startswith(jenkins_java_selected.home | lower)
+
+- name: Inventory plugins after the core upgrade (detects core-driven changes)
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsPlugins.ps1') }}"
+    parameters:
+      JenkinsHome: "{{ jenkins_home }}"
+    depth: 3
+  register: _plugins_core
+  changed_when: false
+
+- name: Record
+  ansible.builtin.set_fact:
+    jenkins_plugins_after_core: "{{ _plugins_core.output }}"
+
+- name: Ask Jenkins which plugins failed to load
+  ansible.builtin.include_tasks: failed_plugins.yml
+  vars:
+    jenkins_failed_stage: core

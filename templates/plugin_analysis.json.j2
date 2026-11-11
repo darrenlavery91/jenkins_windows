@@ -1,0 +1,42 @@
+{#- Inputs: jenkins_analysis_plugins, jenkins_uc, jenkins_target_version, jenkins_java_major_selected -#}
+{%- set uc_all = jenkins_uc | default({}) -%}
+{%- set uc = uc_all.get('plugins', {}) -%}
+{%- set deprec = uc_all.get('deprecations', {}) -%}
+{%- set have_uc = (uc | length) > 0 -%}
+{%- set ns = namespace(items=[]) -%}
+{%- for p in jenkins_analysis_plugins if not p.disabled -%}
+  {%- if p.required_core and (p.required_core is version(jenkins_target_version, '>')) -%}
+    {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'BLOCKER', 'kind': 'requires_newer_core',
+        'issue': 'Installed version needs Jenkins ' ~ p.required_core ~ ' or newer; target is ' ~ jenkins_target_version ~ '. It will not load.'}] -%}
+  {%- endif -%}
+  {%- if p.min_java and ((p.min_java | int) > (jenkins_java_major_selected | int)) -%}
+    {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'BLOCKER', 'kind': 'requires_newer_java',
+        'issue': 'Needs Java ' ~ p.min_java ~ ' or newer; Jenkins will run on Java ' ~ jenkins_java_major_selected ~ '.'}] -%}
+  {%- endif -%}
+  {%- for d in p.missing_deps -%}
+    {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'BLOCKER', 'kind': 'missing_dependency',
+        'issue': 'Hard dependency problem: ' ~ d ~ '. The plugin will fail to load.'}] -%}
+  {%- endfor -%}
+  {%- if have_uc -%}
+    {%- set u = uc.get(p.name) -%}
+    {%- if not u -%}
+      {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'WARNING', 'kind': 'not_in_update_center',
+          'issue': 'Not listed in the update center (removed, renamed, unmaintained or a private plugin). It cannot be updated automatically.'}] -%}
+    {%- else -%}
+      {%- if p.name in deprec -%}
+        {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'WARNING', 'kind': 'deprecated',
+            'issue': 'Marked deprecated by the Jenkins project: ' ~ (deprec[p.name].get('url', '') if deprec[p.name] is mapping else '')}] -%}
+      {%- endif -%}
+      {%- if u.version != p.version -%}
+        {%- if u.requiredCore is defined and u.requiredCore and (u.requiredCore is version(jenkins_target_version, '>')) -%}
+          {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'WARNING', 'kind': 'update_blocked_core',
+              'issue': 'Latest ' ~ u.version ~ ' needs Jenkins ' ~ u.requiredCore ~ '; stays on ' ~ p.version ~ ' with this core.'}] -%}
+        {%- else -%}
+          {%- set ns.items = ns.items + [{'name': p.name, 'version': p.version, 'severity': 'INFO', 'kind': 'update_available',
+              'issue': 'Update available: ' ~ u.version}] -%}
+        {%- endif -%}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endif -%}
+{%- endfor -%}
+{{ ns.items | to_json }}

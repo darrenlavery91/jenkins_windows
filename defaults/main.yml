@@ -1,0 +1,127 @@
+---
+# =============================================================================
+# REQUIRED
+# =============================================================================
+# Target Jenkins version. Weekly "2.544" or LTS "2.541.3". ALWAYS quote it.
+jenkins_target_version: ""
+# JENKINS_HOME (jobs, plugins, config.xml). NOT the folder holding the WAR.
+jenkins_home: ""
+
+# =============================================================================
+# MODES
+# =============================================================================
+# true = run discovery + compatibility + plugin analysis + disk check, write the
+# report, change NOTHING on the server.
+jenkins_plan_only: false
+jenkins_allow_downgrade: false
+jenkins_force_same_version: false
+
+# =============================================================================
+# LOCATIONS / SERVICE
+# =============================================================================
+jenkins_service_name: Jenkins_Server
+jenkins_install_dir: 'E:\Jenkins\server'
+jenkins_startup_script: '{{ jenkins_install_dir }}\start.jenkins.bat'
+# Only needed if the version cannot be read from the startup script.
+jenkins_current_version_override: ""
+
+# =============================================================================
+# WAR SOURCE
+# =============================================================================
+# Folder (UNC or local) containing jenkins-<version>.war. Leave empty to download
+# from get.jenkins.io (weekly -> /war/, LTS (3-part version) -> /war-stable/).
+jenkins_war_source_dir: ""
+jenkins_war_download_url: ""      # override the computed download URL
+jenkins_war_sha256: ""            # optional: pin the expected SHA-256
+jenkins_war_download_timeout: 600
+
+# =============================================================================
+# JAVA
+# =============================================================================
+# minimal   = reuse an installed JDK that Jenkins supports (avoids installs)
+# preferred = always move to the first entry of jenkins_java_preference
+jenkins_java_strategy: minimal
+jenkins_java_preference: [21, 25, 17]
+jenkins_java_major: ""            # force a major version (must be supported)
+jenkins_java_home: ""             # force an existing JDK (full path)
+jenkins_java_auto_install: true
+jenkins_java_allow_openj9: false  # Jenkins maintainers do not test OpenJ9
+jenkins_java_pin_in_script: true  # write JAVA_HOME/PATH into the startup script
+# msi        = ansible.windows.win_package from jenkins_java_msi_urls (no extra collection)
+# chocolatey = needs the chocolatey.chocolatey collection installed separately
+jenkins_java_install_method: msi          # msi | chocolatey
+jenkins_java_choco_packages:
+  '17': temurin17
+  '21': temurin21
+  '25': temurin25
+# Don't touch the machine PATH; Jenkins gets its Java from the startup script.
+jenkins_java_choco_params: '/ADDLOCAL=FeatureMain'
+# For air-gapped servers: { '21': '\\fileserver\apps\java\OpenJDK21U-jdk_x64_windows_hotspot_21.0.x.msi' }
+jenkins_java_msi_urls: {}
+jenkins_java_msi_arguments: 'ADDLOCAL=FeatureMain'
+jenkins_java_search_paths:
+  - 'C:\Program Files\Eclipse Adoptium'
+  - 'C:\Program Files\Java'
+  - 'C:\Program Files\Microsoft'
+  - 'C:\Program Files\Amazon Corretto'
+  - 'C:\Program Files\Zulu'
+  - 'C:\Program Files\BellSoft'
+  - 'C:\Program Files\OpenJDK'
+  - 'C:\Program Files\Semeru'
+  - 'C:\Program Files\RedHat'
+
+# =============================================================================
+# BACKUP / ROLLBACK
+# =============================================================================
+jenkins_backup_dir: 'E:\Jenkins_Backups'
+jenkins_backup_keep: 5
+# Directory NAMES excluded from the JENKINS_HOME backup (at any depth).
+jenkins_backup_exclude_dirs: [workspace, caches, war]
+jenkins_robocopy_flags: '/COPY:DATS /DCOPY:DAT /R:2 /W:5 /MT:16 /XJ /NFL /NDL /NP'
+jenkins_backup_space_factor: 1.25   # free space must exceed estimate * factor
+jenkins_rollback_on_failure: true
+jenkins_rollback_restore_home: true # restore JENKINS_HOME too (config/plugins)
+# Standalone rollback (tasks_from: rollback): empty = newest backup.
+jenkins_rollback_backup_id: ""
+
+# =============================================================================
+# SHUTDOWN BEHAVIOUR
+# =============================================================================
+jenkins_quiet_down: true            # needs API credentials; waits for builds
+jenkins_quiet_down_timeout: 1800
+jenkins_quiet_down_delay: 30
+jenkins_quiet_down_force: true      # carry on after timeout (aborts builds)
+jenkins_kill_orphans: true          # kill leftover java.exe running the WAR
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+jenkins_url: 'http://localhost:8080'          # include context path if any
+jenkins_health_url: '{{ jenkins_url }}/login'
+jenkins_health_status_codes: [200, 401, 403]
+jenkins_health_retries: 60
+jenkins_health_delay: 10
+jenkins_validate_certs: false
+jenkins_verify_running_version: true          # compare X-Jenkins header
+
+# =============================================================================
+# PLUGINS
+# =============================================================================
+# Credentials: needed for quiet-down, failed-plugin detection and plugin updates.
+# Use an API token (Vault it!), user needs Overall/Administer.
+jenkins_admin_user: ""
+jenkins_admin_api_token: ""
+jenkins_no_log: true
+jenkins_update_plugins: true        # update plugins after the core upgrade
+jenkins_plugin_update_exclude: []
+jenkins_plugins_fail_rollback: false # roll back if plugins fail to load
+jenkins_fetch_update_center: true
+jenkins_update_center_url: 'https://updates.jenkins.io'
+# Offline: path (on the controller) to a saved update-center.actual.json
+jenkins_update_center_file: ""
+jenkins_cli_extra_args: '-webSocket'
+
+# =============================================================================
+# REPORT
+# =============================================================================
+jenkins_report_dir: '{{ playbook_dir }}/jenkins_reports'

@@ -1,0 +1,54 @@
+---
+# Standalone rollback:
+#   - ansible.builtin.include_role:
+#       name: jenkins_windows
+#       tasks_from: rollback
+#     vars: { jenkins_backup_dir: 'E:\Jenkins_Backups', jenkins_rollback_backup_id: '20261111-064800' }
+- name: Normalise backup dir
+  ansible.builtin.set_fact:
+    jenkins_backup_dir: >-
+      {{ (jenkins_backup_dir | string | trim).rstrip('\\/') }}
+
+- name: List backups
+  ansible.windows.win_find:
+    paths: "{{ jenkins_backup_dir }}"
+    file_type: directory
+    patterns: '^\d{8}-\d{6}$'
+    use_regex: true
+  register: _backups
+
+- name: Choose backup
+  ansible.builtin.set_fact:
+    jenkins_restore_dir: >-
+      {{ (_backups.files | map(attribute='path') | select('search', (jenkins_rollback_backup_id ~ '$') if jenkins_rollback_backup_id | length > 0 else '.')
+          | sort | last) | default('') }}
+
+- name: Fail if no backup found
+  ansible.builtin.assert:
+    that: jenkins_restore_dir | length > 0
+    fail_msg: "No backup found in {{ jenkins_backup_dir }} (id='{{ jenkins_rollback_backup_id }}')."
+    quiet: true
+
+- name: Read manifest
+  ansible.windows.win_slurp:
+    src: "{{ jenkins_restore_dir }}\\manifest.json"
+  register: _manifest
+
+- name: Parse manifest
+  ansible.builtin.set_fact:
+    jenkins_restore_manifest: "{{ _manifest.content | b64decode | from_json }}"
+    jenkins_run_id: "{{ jenkins_restore_dir | win_basename }}"
+    jenkins_run_dir: "{{ jenkins_restore_dir }}"
+    jenkins_current_version: "{{ (_manifest.content | b64decode | from_json).from_version }}"
+    jenkins_target_version: "{{ (_manifest.content | b64decode | from_json).to_version }}"
+    jenkins_warnings: []
+    jenkins_plan_only: false
+
+- name: Restore
+  ansible.builtin.include_tasks: restore.yml
+  vars:
+    jenkins_failure_reason: "manual rollback requested"
+
+- name: Finish
+  ansible.builtin.debug:
+    msg: "Rolled back {{ inventory_hostname }} to Jenkins {{ jenkins_restore_manifest.from_version }} from {{ jenkins_restore_dir }}"

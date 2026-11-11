@@ -1,0 +1,28 @@
+---
+- name: Stop the Jenkins service
+  ansible.windows.win_service:
+    name: "{{ jenkins_service_name }}"
+    state: stopped
+  register: _stop
+
+- name: Remember that we stopped it
+  ansible.builtin.set_fact:
+    jenkins_stopped_by_role: true
+
+- name: Make sure no java.exe is still running the WAR
+  ansible.windows.win_powershell:
+    script: |
+      param([bool]$Kill)
+      $re = '-jar\s+"?[^\s"]*jenkins[^\s"]*\.war'
+      $procs = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re })
+      if ($procs.Count -gt 0 -and $Kill) {
+          $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          Start-Sleep -Seconds 5
+          $procs = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re })
+      }
+      $Ansible.Result = @{ remaining = $procs.Count }
+      if ($procs.Count -gt 0) { $Ansible.Failed = $true }
+    parameters:
+      Kill: "{{ jenkins_kill_orphans | bool }}"
+  register: _orphans
+  changed_when: false

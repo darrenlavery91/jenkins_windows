@@ -1,0 +1,40 @@
+---
+# Needs API credentials (Script Console permission). Sets jenkins_failed_plugins.
+- name: Query script console for failed / inactive plugins
+  ansible.windows.win_uri:
+    url: "{{ jenkins_url }}/scriptText"
+    method: POST
+    url_username: "{{ jenkins_admin_user }}"
+    url_password: "{{ jenkins_admin_api_token }}"
+    force_basic_auth: true
+    content_type: application/x-www-form-urlencoded
+    body: "script={{ jenkins_groovy_plugin_check | urlencode }}"
+    return_content: true
+    validate_certs: "{{ jenkins_validate_certs }}"
+  register: _failed
+  failed_when: false
+  no_log: "{{ jenkins_no_log }}"
+  when: jenkins_has_api_creds | bool
+
+- name: Parse result
+  ansible.builtin.set_fact:
+    jenkins_failed_plugins: >-
+      {%- set out = [] -%}
+      {%- for line in (_failed.content | default('')).splitlines() if line.startswith('FAILED|') or line.startswith('INACTIVE|') -%}
+      {%- set f = line.split('|') -%}
+      {%- set _ = out.append({'kind': f[0], 'name': f[1], 'detail': (f[2] | default('')) if f[0] == 'FAILED' else ('version ' ~ (f[2] | default('')))}) -%}
+      {%- endfor -%}
+      {{ out }}
+    jenkins_failed_plugins_checked: "{{ (_failed.status_code | default(0) | int) == 200 }}"
+
+- name: Not checked (no credentials or console unavailable)
+  ansible.builtin.set_fact:
+    jenkins_failed_plugins: []
+    jenkins_failed_plugins_checked: false
+  when: not (jenkins_has_api_creds | bool)
+
+- name: Roll back when plugins failed and policy says so
+  ansible.builtin.assert:
+    that: jenkins_failed_plugins | length == 0 or not (jenkins_plugins_fail_rollback | bool)
+    fail_msg: "{{ jenkins_failed_plugins | length }} plugin(s) failed to load: {{ jenkins_failed_plugins | map(attribute='name') | join(', ') }}"
+    quiet: true

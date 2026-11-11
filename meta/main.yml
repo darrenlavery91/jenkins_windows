@@ -1,0 +1,25 @@
+---
+galaxy_info:
+  role_name: jenkins_windows
+  namespace: darrenlavery91
+  author: Darren Lavery
+  description: >-
+    Install, upgrade, back up and roll back the Jenkins WAR on Windows servers, with
+    Java compatibility checks, Java installation, and a before/after plugin report.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Windows
+      versions:
+        - "2016"
+        - "2019"
+        - "2022"
+        - "2025"
+  galaxy_tags:
+    - jenkins
+    - windows
+    - upgrade
+    - backup
+    - rollback
+    - java
+dependencies: []

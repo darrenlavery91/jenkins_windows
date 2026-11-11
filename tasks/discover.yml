@@ -1,0 +1,128 @@
+---
+- name: Look up the Jenkins Windows service
+  ansible.windows.win_service:
+    name: "{{ jenkins_service_name }}"
+  register: _jenkins_svc
+  check_mode: false
+
+- name: Fail if the service does not exist
+  ansible.builtin.assert:
+    that: _jenkins_svc.exists | bool
+    fail_msg: "Windows service '{{ jenkins_service_name }}' was not found on {{ inventory_hostname }}."
+    quiet: true
+
+- name: Check JENKINS_HOME and install dir exist
+  ansible.windows.win_stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop:
+    - "{{ jenkins_home }}"
+    - "{{ jenkins_home }}\\plugins"
+    - "{{ jenkins_install_dir }}"
+    - "{{ jenkins_startup_script }}"
+  register: _paths
+  check_mode: false
+
+- name: Fail if any required path is missing
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: "Required path not found: {{ item.item }}"
+    quiet: true
+  loop: "{{ _paths.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Read startup script and detect the configured WAR version
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$Path)
+      $text = [IO.File]::ReadAllText($Path)
+      $v = @([regex]::Matches($text, '(?i)jenkins[-_](?<v>\d+(?:\.\d+)+)\.war') | ForEach-Object { $_.Groups['v'].Value } | Select-Object -Unique)
+      $Ansible.Result = @{ war_versions = $v }
+    parameters:
+      Path: "{{ jenkins_startup_script }}"
+  register: _startup
+  changed_when: false
+  check_mode: false
+
+- name: Set current version
+  ansible.builtin.set_fact:
+    jenkins_current_version: >-
+      {{ jenkins_current_version_override | string
+         if (jenkins_current_version_override | string | length > 0)
+         else (_startup.result.war_versions | first | default('')) }}
+
+- name: Fail if current version unknown
+  ansible.builtin.assert:
+    that: jenkins_current_version | length > 0
+    fail_msg: >-
+      Could not read the current WAR version from {{ jenkins_startup_script }}.
+      Set jenkins_current_version_override.
+    quiet: true
+
+- name: Discover installed Java runtimes
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-JavaInstalls.ps1') }}"
+    parameters:
+      SearchPaths: "{{ jenkins_java_search_paths }}"
+      ExtraHomes: "{{ [jenkins_java_home | string] if (jenkins_java_home | string | length > 0) else [] }}"
+    depth: 3
+  register: _java_discovery
+  changed_when: false
+  check_mode: false
+
+- name: Record Java installs
+  ansible.builtin.set_fact:
+    jenkins_java_installs: "{{ _java_discovery.output }}"
+
+- name: Inventory installed plugins (before)
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsPlugins.ps1') }}"
+    parameters:
+      JenkinsHome: "{{ jenkins_home }}"
+    depth: 3
+  register: _plugins_before
+  changed_when: false
+  check_mode: false
+
+- name: Record plugin inventory
+  ansible.builtin.set_fact:
+    jenkins_plugins_before: "{{ _plugins_before.output }}"
+
+- name: Download update-center metadata for the target core (controller side)
+  ansible.builtin.uri:
+    url: "{{ jenkins_update_center_url }}/update-center.actual.json?version={{ jenkins_target_version }}"
+    return_content: true
+    follow_redirects: all
+    timeout: 90
+  register: _uc
+  failed_when: false
+  run_once: true
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  when:
+    - jenkins_fetch_update_center | bool
+    - jenkins_update_center_file | length == 0
+
+- name: Use update center from the network
+  ansible.builtin.set_fact:
+    jenkins_uc: "{{ _uc.json }}"
+  when:
+    - _uc is defined
+    - _uc.json is defined
+    - _uc.json.plugins is defined
+
+- name: Use update center from a local file
+  ansible.builtin.set_fact:
+    jenkins_uc: "{{ lookup('ansible.builtin.file', jenkins_update_center_file) | from_json }}"
+  when: jenkins_update_center_file | length > 0
+
+- name: No update-center data available
+  ansible.builtin.set_fact:
+    jenkins_uc: {}
+    jenkins_warnings: "{{ jenkins_warnings + ['Update-center data unavailable: plugin availability / deprecation checks were skipped.'] }}"
+  when: jenkins_uc is not defined

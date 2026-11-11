@@ -1,0 +1,13 @@
+---
+# Roll back to the newest backup (or set jenkins_rollback_backup_id).
+- name: Roll back Jenkins
+  hosts: jenkins_windows
+  gather_facts: false
+  tasks:
+    - name: Restore
+      ansible.builtin.include_role:
+        name: jenkins_windows
+        tasks_from: rollback
+      vars:
+        jenkins_backup_dir: 'E:\Jenkins_Backups'
+        # jenkins_rollback_backup_id: "20261111-064800"

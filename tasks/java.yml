@@ -1,0 +1,43 @@
+---
+- name: Install Java (side by side, no global PATH change)
+  when: jenkins_java_needs_install | bool
+  block:
+    # Dynamic include so chocolatey.chocolatey is only needed when actually used.
+    # (The MSI source check lives in plan.yml so plan-only runs catch it.)
+    - name: Install via Chocolatey
+      ansible.builtin.include_tasks: java_chocolatey.yml
+      when: jenkins_java_install_method == 'chocolatey'
+
+    - name: Install via MSI
+      ansible.windows.win_package:
+        path: "{{ jenkins_java_msi_urls[jenkins_java_major_selected | string] }}"
+        arguments: "{{ jenkins_java_msi_arguments }}"
+        state: present
+      when: jenkins_java_install_method == 'msi'
+
+    - name: Re-discover Java
+      ansible.windows.win_powershell:
+        script: "{{ lookup('ansible.builtin.file', 'Get-JavaInstalls.ps1') }}"
+        parameters:
+          SearchPaths: "{{ jenkins_java_search_paths }}"
+          ExtraHomes: []
+        depth: 3
+      register: _java_after
+      changed_when: false
+
+    - name: Select the freshly installed Java
+      ansible.builtin.set_fact:
+        jenkins_java_installs: "{{ _java_after.output }}"
+        jenkins_java_installed_by_role: true
+        jenkins_java_selected: >-
+          {{ _java_after.output | selectattr('is64') | selectattr('major', 'equalto', jenkins_java_major_selected | int)
+             | sort(attribute='sort_key') | last }}
+
+- name: Smoke-test the selected Java
+  ansible.windows.win_command: '"{{ jenkins_java_selected.home }}\bin\java.exe" -version'
+  register: _java_smoke
+  changed_when: false
+
+- name: Report Java choice
+  ansible.builtin.debug:
+    msg: "Jenkins will run on Java {{ jenkins_java_selected.version }} at {{ jenkins_java_selected.home }}"

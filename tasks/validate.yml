@@ -1,0 +1,39 @@
+---
+- name: Normalise inputs
+  ansible.builtin.set_fact:
+    jenkins_target_version: "{{ jenkins_target_version | string | trim }}"
+    jenkins_home: >-
+      {{ (jenkins_home | string | trim).rstrip('\\/') }}
+    jenkins_install_dir: >-
+      {{ (jenkins_install_dir | string | trim).rstrip('\\/') }}
+    jenkins_backup_dir: >-
+      {{ (jenkins_backup_dir | string | trim).rstrip('\\/') }}
+    jenkins_war_source_dir: >-
+      {{ (jenkins_war_source_dir | string | trim).rstrip('\\/') }}
+    jenkins_run_id: "{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}"
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family | default('Windows') == 'Windows'
+      - jenkins_target_version is match('^2\.[0-9]+(\.[0-9]+)?$')
+      - jenkins_home | length > 0
+      - jenkins_install_dir | length > 0
+      - jenkins_service_name | length > 0
+      - jenkins_backup_dir | length > 0
+      - jenkins_java_install_method in ['chocolatey', 'msi']
+      - jenkins_java_strategy in ['minimal', 'preferred']
+      - not (jenkins_backup_dir | lower).startswith((jenkins_home | lower) ~ '\\')
+      - not (jenkins_backup_dir | lower).startswith((jenkins_install_dir | lower) ~ '\\')
+    fail_msg: >-
+      Invalid input. jenkins_target_version must be a quoted version such as "2.544" or
+      "2.541.3"; jenkins_home, jenkins_install_dir, jenkins_service_name and
+      jenkins_backup_dir are required; the backup directory must sit OUTSIDE both
+      jenkins_home and jenkins_install_dir. Windows targets only.
+    quiet: true
+
+- name: Derived paths
+  ansible.builtin.set_fact:
+    jenkins_run_dir: '{{ jenkins_backup_dir }}\{{ jenkins_run_id }}'
+    jenkins_has_api_creds: "{{ (jenkins_admin_user | length > 0) and (jenkins_admin_api_token | length > 0) }}"
+    jenkins_warnings: []

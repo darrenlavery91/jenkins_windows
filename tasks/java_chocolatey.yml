@@ -1,0 +1,11 @@
+---
+# Kept in its own file on purpose: Ansible resolves module names when a task file
+# is loaded (even if `when` is false), so referencing chocolatey.chocolatey in
+# java.yml would make the collection mandatory. This file is only loaded when
+# jenkins_java_install_method == 'chocolatey'; install the collection yourself in
+# that case: ansible-galaxy collection install chocolatey.chocolatey
+- name: Install via Chocolatey
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ jenkins_java_choco_packages[jenkins_java_major_selected | string] }}"
+    state: present
+    package_params: "{{ jenkins_java_choco_params }}"

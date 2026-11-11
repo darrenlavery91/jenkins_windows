@@ -1,0 +1,80 @@
+---
+- name: Resolve WAR names and locations
+  ansible.builtin.set_fact:
+    jenkins_war_name: 'jenkins-{{ jenkins_target_version }}.war'
+    jenkins_war_dest: '{{ jenkins_install_dir }}\jenkins-{{ jenkins_target_version }}.war'
+    jenkins_war_is_lts: "{{ (jenkins_target_version.split('.') | length) == 3 }}"
+
+- name: Resolve WAR source
+  ansible.builtin.set_fact:
+    jenkins_war_src_effective: >-
+      {{ (jenkins_war_source_dir ~ '\\' ~ jenkins_war_name) if (jenkins_war_source_dir | length > 0) else '' }}
+    jenkins_war_url_effective: >-
+      {{ jenkins_war_download_url if (jenkins_war_download_url | length > 0)
+         else 'https://get.jenkins.io/war' ~ ('-stable' if (jenkins_war_is_lts | bool) else '') ~ '/' ~ jenkins_target_version ~ '/jenkins.war' }}
+
+- name: Check WAR on the share
+  ansible.windows.win_stat:
+    path: "{{ jenkins_war_src_effective }}"
+    get_checksum: false
+  register: _war_src
+  when: jenkins_war_src_effective | length > 0
+
+- name: Fail when the WAR is missing from the share
+  ansible.builtin.assert:
+    that: _war_src.stat.exists
+    fail_msg: >-
+      {{ jenkins_war_src_effective }} not found (or not readable: over WinRM a UNC path needs
+      CredSSP / Kerberos delegation / become with runas new_credentials).
+    quiet: true
+  when: jenkins_war_src_effective | length > 0
+
+- name: Copy WAR from share into the install dir
+  ansible.windows.win_copy:
+    src: "{{ jenkins_war_src_effective }}"
+    dest: "{{ jenkins_war_dest }}"
+    remote_src: true
+  when: jenkins_war_src_effective | length > 0
+
+- name: Download WAR from the Jenkins mirror
+  ansible.windows.win_get_url:
+    url: "{{ jenkins_war_url_effective }}"
+    dest: "{{ jenkins_war_dest }}"
+    timeout: "{{ jenkins_war_download_timeout }}"
+  when: jenkins_war_src_effective | length == 0
+
+- name: Fetch published SHA-256 (download mode only)
+  ansible.windows.win_uri:
+    url: "{{ jenkins_war_url_effective }}.sha256"
+    return_content: true
+  register: _war_sha_remote
+  failed_when: false
+  when: jenkins_war_src_effective | length == 0
+
+- name: Inspect staged WAR
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-WarInfo.ps1') }}"
+    parameters:
+      Path: "{{ jenkins_war_dest }}"
+  register: _war_info
+  changed_when: false
+
+- name: Record WAR info
+  ansible.builtin.set_fact:
+    jenkins_war_info: "{{ _war_info.output | first }}"
+    jenkins_war_expected_sha: >-
+      {{ jenkins_war_sha256 | lower if (jenkins_war_sha256 | length > 0)
+         else ((_war_sha_remote.content | default('') | trim).split() | first | default('') | lower
+               if (_war_sha_remote.content | default('') | length > 0) else '') }}
+
+- name: Verify WAR integrity and identity
+  ansible.builtin.assert:
+    that:
+      - jenkins_war_expected_sha | length == 0 or jenkins_war_info.sha256 == jenkins_war_expected_sha
+      - jenkins_war_info.jenkins_version | default('') | length == 0 or jenkins_war_info.jenkins_version == jenkins_target_version
+      - (jenkins_war_info.min_java | default('') | string | length == 0) or ((jenkins_war_info.min_java | int) <= (jenkins_java_major_selected | int))
+    fail_msg: >-
+      WAR check failed. sha256={{ jenkins_war_info.sha256 }} (expected '{{ jenkins_war_expected_sha }}'),
+      manifest version='{{ jenkins_war_info.jenkins_version | default('') }}' (expected {{ jenkins_target_version }}),
+      WAR minimum Java='{{ jenkins_war_info.min_java | default('') }}' (selected Java {{ jenkins_java_major_selected }}).
+    quiet: true

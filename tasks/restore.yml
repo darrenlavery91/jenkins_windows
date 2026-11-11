@@ -1,0 +1,84 @@
+---
+# Inputs: jenkins_restore_dir, jenkins_restore_manifest (dict)
+- name: Stop Jenkins
+  ansible.windows.win_service:
+    name: "{{ jenkins_restore_manifest.service_name }}"
+    state: stopped
+  failed_when: false
+
+- name: Kill any leftover Jenkins java.exe
+  ansible.windows.win_powershell:
+    script: |
+      $re = '-jar\s+"?[^\s"]*jenkins[^\s"]*\.war'
+      Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+      Start-Sleep -Seconds 3
+  changed_when: false
+
+- name: Restore install dir files (startup script etc.)
+  community.windows.win_robocopy:
+    src: "{{ jenkins_restore_dir }}\\install"
+    dest: "{{ jenkins_restore_manifest.install_dir }}"
+    recurse: true
+    flags: "{{ jenkins_robocopy_flags }}"
+
+- name: Restore the original startup script byte-for-byte
+  ansible.windows.win_copy:
+    src: "{{ jenkins_restore_dir }}\\start-script.before"
+    dest: "{{ jenkins_restore_manifest.startup_script }}"
+    remote_src: true
+  failed_when: false   # file only exists if the switch step ran
+
+- name: Make sure the old WAR is present
+  ansible.windows.win_stat:
+    path: "{{ jenkins_restore_manifest.old_war }}"
+    get_checksum: false
+  register: _oldwar
+
+- name: Restore old WAR from backup if it was removed
+  ansible.windows.win_copy:
+    src: "{{ jenkins_restore_dir }}\\war\\{{ jenkins_restore_manifest.old_war | win_basename }}"
+    dest: "{{ jenkins_restore_manifest.old_war }}"
+    remote_src: true
+  when: not _oldwar.stat.exists
+
+- name: Restore JENKINS_HOME (config, jobs, plugins) - mirror
+  community.windows.win_robocopy:
+    src: "{{ jenkins_restore_dir }}\\home"
+    dest: "{{ jenkins_restore_manifest.jenkins_home }}"
+    recurse: true
+    purge: true
+    flags: "{{ jenkins_robocopy_flags }} /XD {{ jenkins_restore_manifest.exclude_dirs | join(' ') }}"
+  when: jenkins_rollback_restore_home | bool
+
+- name: Start Jenkins on the old version
+  ansible.windows.win_service:
+    name: "{{ jenkins_restore_manifest.service_name }}"
+    state: started
+
+- name: Wait for the rolled-back Jenkins
+  ansible.windows.win_uri:
+    url: "{{ jenkins_restore_manifest.health_url }}"
+    validate_certs: "{{ jenkins_validate_certs }}"
+    status_code: "{{ jenkins_health_status_codes }}"
+  register: _rb_health
+  until: (_rb_health.status_code | default(0) | int) in jenkins_health_status_codes
+  retries: "{{ jenkins_health_retries }}"
+  delay: "{{ jenkins_health_delay }}"
+  failed_when: false
+
+- name: Record rollback
+  ansible.builtin.set_fact:
+    jenkins_rolled_back: true
+    jenkins_rollback_healthy: "{{ (_rb_health.status_code | default(0) | int) in jenkins_health_status_codes }}"
+    jenkins_result: ROLLED_BACK
+
+- name: Write rollback record
+  ansible.windows.win_copy:
+    content: "{{ {'rolled_back_at': now(utc=true).isoformat(), 'healthy': jenkins_rollback_healthy, 'reason': jenkins_failure_reason | default('manual rollback')} | to_nice_json }}"
+    dest: "{{ jenkins_restore_dir }}\\rollback.json"
+
+- name: Rollback result
+  ansible.builtin.fail:
+    msg: "Rollback finished but Jenkins is NOT healthy at {{ jenkins_restore_manifest.health_url }}. Manual intervention required; backup is in {{ jenkins_restore_dir }}."
+  when: not (jenkins_rollback_healthy | bool)
