@@ -18,8 +18,10 @@ galaxy_info:
   galaxy_tags:
     - jenkins
     - windows
+    - install
     - upgrade
     - backup
     - rollback
     - java
+    - uninstall
 dependencies: []
