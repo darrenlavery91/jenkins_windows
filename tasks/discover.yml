@@ -32,48 +32,46 @@
   loop_control:
     label: "{{ item.item }}"
 
-- name: Read startup script and detect the configured WAR version
+- name: Read startup definition and detect the configured WAR ({{ jenkins_startup_kind }})
   ansible.windows.win_powershell:
-    script: |
-      param([string]$Path)
-      $text = [IO.File]::ReadAllText($Path)
-      $v = @([regex]::Matches($text, '(?i)jenkins[-_](?<v>\d+(?:\.\d+)+)\.war') | ForEach-Object { $_.Groups['v'].Value } | Select-Object -Unique)
-      $Ansible.Result = @{ war_versions = $v }
+    script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsStartup.ps1') }}"
     parameters:
       Path: "{{ jenkins_startup_script }}"
+      Kind: "{{ jenkins_startup_kind }}"
+      ServiceAccount: "{{ _jenkins_svc.username | default('') }}"
   register: _startup
   changed_when: false
   check_mode: false
 
-- name: Set current version
+- name: Set current version and WAR
   ansible.builtin.set_fact:
     jenkins_current_version: >-
       {{ jenkins_current_version_override | string
          if (jenkins_current_version_override | string | length > 0)
-         else (_startup.result.war_versions | first | default('')) }}
+         else (_startup.result.war_versions | first | default(_startup.result.manifest_version, true) | default('', true)) }}
+    jenkins_current_war: "{{ _startup.result.war_paths | first | default('') }}"
+    jenkins_startup_info: "{{ _startup.result }}"
 
 - name: Fail if current version unknown
   ansible.builtin.assert:
-    that: jenkins_current_version | length > 0
+    that:
+      - jenkins_current_version | length > 0
+      - jenkins_current_war | length > 0
     fail_msg: >-
-      Could not read the current WAR version from {{ jenkins_startup_script }}.
-      Set jenkins_current_version_override.
+      Could not work out the current WAR ({{ jenkins_current_war | default('none found') }}) or its version
+      from {{ jenkins_startup_script }}. Set jenkins_current_version_override.
     quiet: true
 
-- name: Discover installed Java runtimes
-  ansible.windows.win_powershell:
-    script: "{{ lookup('ansible.builtin.file', 'Get-JavaInstalls.ps1') }}"
-    parameters:
-      SearchPaths: "{{ jenkins_java_search_paths }}"
-      ExtraHomes: "{{ [jenkins_java_home | string] if (jenkins_java_home | string | length > 0) else [] }}"
-    depth: 3
-  register: _java_discovery
-  changed_when: false
-  check_mode: false
-
-- name: Record Java installs
+- name: Warn when the WinSW JENKINS_HOME looks different from jenkins_home
   ansible.builtin.set_fact:
-    jenkins_java_installs: "{{ _java_discovery.output }}"
+    jenkins_warnings: >-
+      {{ jenkins_warnings + ['jenkins.xml sets JENKINS_HOME=' ~ _startup.result.jenkins_home_env ~ ' (as the service account sees it) but jenkins_home is ' ~ jenkins_home ~ '. The role backs up and inspects jenkins_home - make sure it is the folder Jenkins really uses.'] }}
+  when:
+    - _startup.result.jenkins_home_env | default('') | length > 0
+    - (_startup.result.jenkins_home_env | lower | regex_replace('[\\\\/]+$', '')) != (jenkins_home | lower)
+
+- name: Discover installed Java runtimes
+  ansible.builtin.include_tasks: java_discover.yml
 
 - name: Inventory installed plugins (before)
   ansible.windows.win_powershell:

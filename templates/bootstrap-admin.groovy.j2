@@ -1,0 +1,31 @@
+// Written by Ansible (jenkins_windows role, jenkins_mode=install) for the FIRST
+// start of a fresh JENKINS_HOME only. Creates the admin user, locks down
+// anonymous access, sets the Jenkins URL - then deletes itself.
+import jenkins.model.Jenkins
+import jenkins.model.JenkinsLocationConfiguration
+import hudson.security.HudsonPrivateSecurityRealm
+import hudson.security.FullControlOnceLoggedInAuthorizationStrategy
+
+def j = Jenkins.get()
+def self = new File(j.rootDir, 'init.groovy.d/{{ jenkins_bootstrap_script_name }}')
+try {
+    def id = new String('{{ jenkins_admin_user | b64encode }}'.decodeBase64(), 'UTF-8')
+    def pw = new String('{{ jenkins_admin_secret | b64encode }}'.decodeBase64(), 'UTF-8')
+    def realm = (j.securityRealm instanceof HudsonPrivateSecurityRealm) ? j.securityRealm : new HudsonPrivateSecurityRealm(false)
+    if (realm.getUser(id) == null) {
+        realm.createAccount(id, pw)
+    }
+    j.securityRealm = realm
+    def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+    strategy.allowAnonymousRead = false
+    j.authorizationStrategy = strategy
+{% if jenkins_url | length > 0 %}
+    def loc = JenkinsLocationConfiguration.get()
+    loc.url = '{{ jenkins_url | regex_replace("/+$", "") }}/'
+    loc.save()
+{% endif %}
+    j.save()
+    println "jenkins_windows bootstrap: admin '${id}' ready, anonymous access disabled"
+} finally {
+    self.delete()
+}

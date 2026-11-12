@@ -7,14 +7,26 @@
       ansible.builtin.include_tasks: java.yml
     - name: Quiet down and drain builds
       ansible.builtin.include_tasks: quiesce.yml
+    - name: "Simulated failure (before_stop) - rollback drill"
+      ansible.builtin.fail:
+        msg: "jenkins_simulate_failure=before_stop: failing on purpose to exercise the rollback path."
+      when: jenkins_simulate_failure == 'before_stop'
     - name: Stop Jenkins
       ansible.builtin.include_tasks: stop.yml
     - name: Back up
       ansible.builtin.include_tasks: backup.yml
+    - name: "Simulated failure (after_backup) - rollback drill"
+      ansible.builtin.fail:
+        msg: "jenkins_simulate_failure=after_backup: failing on purpose to exercise the rollback path."
+      when: jenkins_simulate_failure == 'after_backup'
     - name: Switch startup script to new WAR / Java
       ansible.builtin.include_tasks: switch.yml
     - name: Start and verify
       ansible.builtin.include_tasks: start_verify.yml
+    - name: "Simulated failure (after_start) - rollback drill"
+      ansible.builtin.fail:
+        msg: "jenkins_simulate_failure=after_start: failing on purpose to exercise the rollback path."
+      when: jenkins_simulate_failure == 'after_start'
     - name: Update plugins
       ansible.builtin.include_tasks: plugins_update.yml
     - name: Finalise (inventory, diff, prune old backups)

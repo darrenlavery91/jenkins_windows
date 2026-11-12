@@ -1,4 +1,6 @@
 ---
+# NOTE: community.windows.win_robocopy ignores `recurse` / `purge` whenever
+# `flags` is set, so /E (and /PURGE on restore) must be in the flags themselves.
 - name: Create backup directory
   ansible.windows.win_file:
     path: "{{ item }}"
@@ -11,22 +13,41 @@
   community.windows.win_robocopy:
     src: "{{ jenkins_home }}"
     dest: "{{ jenkins_run_dir }}\\home"
-    recurse: true
-    flags: "{{ jenkins_robocopy_flags }} /XD {{ jenkins_backup_exclude_dirs | join(' ') }}"
+    flags: "/E {{ jenkins_robocopy_flags }} /XD {{ jenkins_backup_exclude_dirs | join(' ') }}"
 
 - name: Back up install dir (scripts, wrappers; WARs excluded)
   community.windows.win_robocopy:
     src: "{{ jenkins_install_dir }}"
     dest: "{{ jenkins_run_dir }}\\install"
-    recurse: true
-    flags: "{{ jenkins_robocopy_flags }} /XF *.war"
+    flags: "/E {{ jenkins_robocopy_flags }} /XF *.war"
 
 - name: Back up the WAR currently in use
   ansible.windows.win_copy:
-    src: '{{ jenkins_install_dir }}\jenkins-{{ jenkins_current_version }}.war'
+    src: "{{ jenkins_current_war }}"
     dest: "{{ jenkins_run_dir }}\\war\\"
     remote_src: true
-  failed_when: false   # an older layout may not follow this naming; the manifest records it
+
+- name: Save the original startup definition byte-for-byte
+  ansible.windows.win_copy:
+    src: "{{ jenkins_startup_script }}"
+    dest: "{{ jenkins_run_dir }}\\start-script.before"
+    remote_src: true
+
+- name: Verify the JENKINS_HOME backup is complete
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Test-JenkinsBackup.ps1') }}"
+    parameters:
+      Backup: "{{ jenkins_run_dir }}\\home"
+      Source: "{{ jenkins_home }}"
+      ExcludeDirs: "{{ jenkins_backup_exclude_dirs }}"
+  register: _backup_check
+  changed_when: false
+
+- name: Fail when the backup is incomplete
+  ansible.builtin.assert:
+    that: _backup_check.result.ok | bool
+    fail_msg: "Backup {{ jenkins_run_dir }}\\home is NOT complete: {{ _backup_check.result.problems | join('; ') }}"
+    quiet: true
 
 - name: Export Windows service definition (reference copy)
   ansible.windows.win_command: >-
@@ -48,12 +69,16 @@
       jenkins_home: "{{ jenkins_home }}"
       install_dir: "{{ jenkins_install_dir }}"
       startup_script: "{{ jenkins_startup_script }}"
+      startup_kind: "{{ jenkins_startup_kind }}"
       service_name: "{{ jenkins_service_name }}"
-      old_war: '{{ jenkins_install_dir }}\jenkins-{{ jenkins_current_version }}.war'
+      old_war: "{{ jenkins_current_war }}"
       new_war: "{{ jenkins_war_dest }}"
       exclude_dirs: "{{ jenkins_backup_exclude_dirs }}"
       java_home_new: "{{ jenkins_java_selected.home }}"
       health_url: "{{ jenkins_health_url }}"
+      home_files: "{{ _backup_check.result.files }}"
+      home_bytes: "{{ _backup_check.result.bytes }}"
+      manifest_version: 2
 
 - name: Write manifest LAST (its presence marks a complete backup)
   ansible.windows.win_copy:

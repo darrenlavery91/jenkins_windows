@@ -1,0 +1,10 @@
+# ansible-lint / ansible-galaxy cache
+.ansible/
+# Reports written by example runs
+jenkins_reports/
+*.retry
+# OS / editor clutter
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

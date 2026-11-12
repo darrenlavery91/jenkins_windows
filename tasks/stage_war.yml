@@ -7,8 +7,10 @@
 
 - name: Resolve WAR source
   ansible.builtin.set_fact:
+    jenkins_war_from_controller: "{{ jenkins_war_controller_file | default('') | length > 0 }}"
     jenkins_war_src_effective: >-
-      {{ (jenkins_war_source_dir ~ '\\' ~ jenkins_war_name) if (jenkins_war_source_dir | length > 0) else '' }}
+      {{ (jenkins_war_source_dir ~ '\\' ~ jenkins_war_name)
+         if (jenkins_war_source_dir | length > 0 and jenkins_war_controller_file | default('') | length == 0) else '' }}
     jenkins_war_url_effective: >-
       {{ jenkins_war_download_url if (jenkins_war_download_url | length > 0)
          else 'https://get.jenkins.io/war' ~ ('-stable' if (jenkins_war_is_lts | bool) else '') ~ '/' ~ jenkins_target_version ~ '/jenkins.war' }}
@@ -34,14 +36,25 @@
     src: "{{ jenkins_war_src_effective }}"
     dest: "{{ jenkins_war_dest }}"
     remote_src: true
+  register: _war_stage_share
   when: jenkins_war_src_effective | length > 0
+
+- name: Push WAR from the controller
+  ansible.windows.win_copy:
+    src: "{{ jenkins_war_controller_file }}"
+    dest: "{{ jenkins_war_dest }}"
+  register: _war_stage_push
+  when: jenkins_war_from_controller | bool
 
 - name: Download WAR from the Jenkins mirror
   ansible.windows.win_get_url:
     url: "{{ jenkins_war_url_effective }}"
     dest: "{{ jenkins_war_dest }}"
     timeout: "{{ jenkins_war_download_timeout }}"
-  when: jenkins_war_src_effective | length == 0
+  register: _war_stage_dl
+  when:
+    - jenkins_war_src_effective | length == 0
+    - not (jenkins_war_from_controller | bool)
 
 - name: Fetch published SHA-256 (download mode only)
   ansible.windows.win_uri:
@@ -49,7 +62,14 @@
     return_content: true
   register: _war_sha_remote
   failed_when: false
-  when: jenkins_war_src_effective | length == 0
+  when:
+    - jenkins_war_src_effective | length == 0
+    - not (jenkins_war_from_controller | bool)
+
+- name: Did staging change the WAR on disk?
+  ansible.builtin.set_fact:
+    jenkins_war_staged_changed: >-
+      {{ (_war_stage_share is changed) or (_war_stage_push is changed) or (_war_stage_dl is changed) }}
 
 - name: Inspect staged WAR
   ansible.windows.win_powershell:
@@ -66,6 +86,21 @@
       {{ jenkins_war_sha256 | lower if (jenkins_war_sha256 | length > 0)
          else ((_war_sha_remote.content | default('') | trim).split() | first | default('') | lower
                if (_war_sha_remote.content | default('') | length > 0) else '') }}
+
+- name: Evaluate WAR checks
+  ansible.builtin.set_fact:
+    jenkins_war_ok: >-
+      {{ (jenkins_war_expected_sha | length == 0 or jenkins_war_info.sha256 == jenkins_war_expected_sha)
+         and (jenkins_war_info.jenkins_version | default('') | length == 0 or jenkins_war_info.jenkins_version == jenkins_target_version)
+         and ((jenkins_war_info.min_java | default('') | string | length == 0) or ((jenkins_war_info.min_java | int) <= (jenkins_java_major_selected | int))) }}
+
+- name: Remove a staged WAR that failed verification (never the WAR in use)
+  ansible.windows.win_file:
+    path: "{{ jenkins_war_dest }}"
+    state: absent
+  when:
+    - not (jenkins_war_ok | bool)
+    - (jenkins_war_dest | lower) != (jenkins_current_war | default("") | lower)
 
 - name: Verify WAR integrity and identity
   ansible.builtin.assert:

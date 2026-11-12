@@ -13,7 +13,7 @@
   ansible.windows.win_powershell:
     script: |
       param([bool]$Kill)
-      $re = '-jar\s+"?[^\s"]*jenkins[^\s"]*\.war'
+      $re = '-jar\s+(?:"[^"]*jenkins[^"]*\.war"|[^\s"]*jenkins[^\s"]*\.war)'
       $procs = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re })
       if ($procs.Count -gt 0 -and $Kill) {
           $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

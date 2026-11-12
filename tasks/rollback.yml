@@ -9,28 +9,39 @@
     jenkins_backup_dir: >-
       {{ (jenkins_backup_dir | string | trim).rstrip('\\/') }}
 
-- name: List backups
-  ansible.windows.win_find:
-    paths: "{{ jenkins_backup_dir }}"
-    file_type: directory
-    patterns: '^\d{8}-\d{6}$'
-    use_regex: true
+- name: List complete backups (manifest.json present)
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$Dir)
+      $all = @()
+      if (Test-Path -LiteralPath $Dir) {
+        $all = @(Get-ChildItem -LiteralPath $Dir -Directory |
+          Where-Object { $_.Name -match '^\d{8}-\d{6}$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json')) } |
+          Sort-Object Name | ForEach-Object { $_.FullName })
+      }
+      $Ansible.Result = @{ backups = $all }
+    parameters:
+      Dir: "{{ jenkins_backup_dir }}"
   register: _backups
+  changed_when: false
 
 - name: Choose backup
   ansible.builtin.set_fact:
     jenkins_restore_dir: >-
-      {{ (_backups.files | map(attribute='path') | select('search', (jenkins_rollback_backup_id ~ '$') if jenkins_rollback_backup_id | length > 0 else '.')
-          | sort | last) | default('') }}
+      {%- if jenkins_rollback_backup_id | length > 0 -%}
+      {{ _backups.result.backups | select('match', '^.*' ~ (jenkins_rollback_backup_id | regex_escape) ~ '$') | first | default('') }}
+      {%- else -%}
+      {{ _backups.result.backups | last | default('') }}
+      {%- endif -%}
 
 - name: Fail if no backup found
   ansible.builtin.assert:
     that: jenkins_restore_dir | length > 0
-    fail_msg: "No backup found in {{ jenkins_backup_dir }} (id='{{ jenkins_rollback_backup_id }}')."
+    fail_msg: "No complete backup (with manifest.json) found in {{ jenkins_backup_dir }} (id='{{ jenkins_rollback_backup_id }}'). Available: {{ _backups.result.backups | map('win_basename') | join(', ') or 'none' }}"
     quiet: true
 
 - name: Read manifest
-  ansible.windows.win_slurp:
+  ansible.builtin.slurp:
     src: "{{ jenkins_restore_dir }}\\manifest.json"
   register: _manifest
 

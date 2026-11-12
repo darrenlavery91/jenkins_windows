@@ -9,9 +9,13 @@
 | Java used | {% if jenkins_java_selected is defined %}{{ jenkins_java_selected.version }} ({{ jenkins_java_selected.home }}){% else %}Java {{ jenkins_java_major_selected | default('?') }} (to be installed){% endif %} |
 | Java installed by this run | {{ 'yes' if jenkins_java_installed_by_role | default(false) | bool else 'no' }} |
 | Backup location | {{ jenkins_run_dir | default('n/a') }}{{ '' if jenkins_backup_done | default(false) | bool else ' (not created)' }} |
+{% if (jenkins_manifest | default({})).home_files is defined %}
+| Backup verified | JENKINS_HOME: {{ jenkins_manifest.home_files }} files, {{ ((jenkins_manifest.home_bytes | int) / 1048576) | round(1) }} MiB (excluded: {{ jenkins_backup_exclude_dirs | join(', ') }}) |
+{% endif %}
+| Startup definition | {{ jenkins_startup_script | default('?') }} ({{ jenkins_startup_kind | default('?') }}) |
 {% if jenkins_failure_reason is defined %}
 | Failure | {{ jenkins_failure_reason | replace('\n', ' ') | truncate(400) }} |
-| Rolled back | {{ 'yes - healthy: ' ~ jenkins_rollback_healthy | default('?') if jenkins_rolled_back | default(false) | bool else 'no' }} |
+| Rolled back | {{ ('yes - running ' ~ jenkins_rollback_version | default('?') ~ ', healthy: ' ~ jenkins_rollback_healthy | default('?')) if jenkins_rolled_back | default(false) | bool else 'no' }} |
 {% endif %}
 
 {% if jenkins_warnings | default([]) | length > 0 %}
@@ -88,7 +92,7 @@ No plugin changes were made in this run. Updates available for the target core: 
 {% endif %}
 
 {% if jenkins_script_diff is defined %}
-## Startup script changes
+## Startup definition changes
 ```
 {{ jenkins_script_diff | join('\n') }}
 ```

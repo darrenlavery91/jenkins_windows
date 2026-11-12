@@ -1,0 +1,16 @@
+---
+# Read-only: list installed JDKs/JREs into jenkins_java_installs.
+- name: Discover installed Java runtimes
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-JavaInstalls.ps1') }}"
+    parameters:
+      SearchPaths: "{{ jenkins_java_search_paths }}"
+      ExtraHomes: "{{ [jenkins_java_home | string] if (jenkins_java_home | string | length > 0) else [] }}"
+    depth: 3
+  register: _java_discovery
+  changed_when: false
+  check_mode: false
+
+- name: Record Java installs
+  ansible.builtin.set_fact:
+    jenkins_java_installs: "{{ _java_discovery.output }}"

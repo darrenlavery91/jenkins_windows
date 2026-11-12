@@ -1,5 +1,53 @@
 ---
 # Inputs: jenkins_restore_dir, jenkins_restore_manifest (dict)
+# NOTE: win_robocopy ignores `recurse` / `purge` when `flags` is set -> /E /PURGE in flags.
+
+# ----------------------------------------------------------- preflight (no changes)
+- name: Check the backup before touching anything
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$Dir, [string]$OldWar)
+      $p = New-Object System.Collections.Generic.List[string]
+      foreach ($f in 'manifest.json', 'start-script.before') {
+        if (-not (Test-Path -LiteralPath (Join-Path $Dir $f))) { $p.Add("$f missing") }
+      }
+      if (-not (Test-Path -LiteralPath (Join-Path $Dir 'install'))) { $p.Add('install\ missing') }
+      $war = Join-Path (Join-Path $Dir 'war') (Split-Path -Leaf $OldWar)
+      if (-not (Test-Path -LiteralPath $OldWar) -and -not (Test-Path -LiteralPath $war)) { $p.Add("old WAR $OldWar is gone and not in the backup") }
+      $Ansible.Result = @{ problems = @($p) }
+    parameters:
+      Dir: "{{ jenkins_restore_dir }}"
+      OldWar: "{{ jenkins_restore_manifest.old_war }}"
+  register: _rb_pre
+  changed_when: false
+
+- name: Check the JENKINS_HOME copy in the backup
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Test-JenkinsBackup.ps1') }}"
+    parameters:
+      Backup: "{{ jenkins_restore_dir }}\\home"
+  register: _rb_home
+  changed_when: false
+  when: jenkins_rollback_restore_home | bool
+
+- name: Refuse to restore from a broken backup
+  ansible.builtin.assert:
+    that:
+      - _rb_pre.result.problems | length == 0
+      - not (jenkins_rollback_restore_home | bool) or (_rb_home.result.ok | bool)
+      - not (jenkins_rollback_restore_home | bool)
+        or (jenkins_restore_manifest.home_files is not defined)
+        or ((_rb_home.result.files | int) >= (jenkins_restore_manifest.home_files | int))
+    fail_msg: >-
+      Backup {{ jenkins_restore_dir }} cannot be restored safely:
+      {{ (_rb_pre.result.problems + (_rb_home.result.problems | default([]))) | join('; ') }}
+      {{ ('home holds ' ~ _rb_home.result.files ~ ' files, manifest recorded ' ~ jenkins_restore_manifest.home_files)
+         if (jenkins_restore_manifest.home_files is defined and _rb_home.result is defined) else '' }}.
+      Nothing was changed. Use another backup, or set jenkins_rollback_restore_home=false to restore only
+      the WAR/startup definition.
+    quiet: true
+
+# ----------------------------------------------------------------------- restore
 - name: Stop Jenkins
   ansible.windows.win_service:
     name: "{{ jenkins_restore_manifest.service_name }}"
@@ -9,25 +57,23 @@
 - name: Kill any leftover Jenkins java.exe
   ansible.windows.win_powershell:
     script: |
-      $re = '-jar\s+"?[^\s"]*jenkins[^\s"]*\.war'
+      $re = '-jar\s+(?:"[^"]*jenkins[^"]*\.war"|[^\s"]*jenkins[^\s"]*\.war)'
       Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
       Start-Sleep -Seconds 3
   changed_when: false
 
-- name: Restore install dir files (startup script etc.)
+- name: Restore install dir files (wrapper, logs config; WARs untouched)
   community.windows.win_robocopy:
     src: "{{ jenkins_restore_dir }}\\install"
     dest: "{{ jenkins_restore_manifest.install_dir }}"
-    recurse: true
-    flags: "{{ jenkins_robocopy_flags }}"
+    flags: "/E {{ jenkins_robocopy_flags }}"
 
-- name: Restore the original startup script byte-for-byte
+- name: Restore the original startup definition byte-for-byte
   ansible.windows.win_copy:
     src: "{{ jenkins_restore_dir }}\\start-script.before"
     dest: "{{ jenkins_restore_manifest.startup_script }}"
     remote_src: true
-  failed_when: false   # file only exists if the switch step ran
 
 - name: Make sure the old WAR is present
   ansible.windows.win_stat:
@@ -42,13 +88,11 @@
     remote_src: true
   when: not _oldwar.stat.exists
 
-- name: Restore JENKINS_HOME (config, jobs, plugins) - mirror
+- name: Restore JENKINS_HOME (config, jobs, plugins) - mirror, excluded dirs kept
   community.windows.win_robocopy:
     src: "{{ jenkins_restore_dir }}\\home"
     dest: "{{ jenkins_restore_manifest.jenkins_home }}"
-    recurse: true
-    purge: true
-    flags: "{{ jenkins_robocopy_flags }} /XD {{ jenkins_restore_manifest.exclude_dirs | join(' ') }}"
+    flags: "/E /PURGE {{ jenkins_robocopy_flags }} /XD {{ jenkins_restore_manifest.exclude_dirs | join(' ') }}"
   when: jenkins_rollback_restore_home | bool
 
 - name: Start Jenkins on the old version
@@ -70,15 +114,25 @@
 - name: Record rollback
   ansible.builtin.set_fact:
     jenkins_rolled_back: true
-    jenkins_rollback_healthy: "{{ (_rb_health.status_code | default(0) | int) in jenkins_health_status_codes }}"
+    jenkins_rollback_version: "{{ _rb_health.x_jenkins | default('unknown') }}"
+    jenkins_rollback_healthy: >-
+      {{ ((_rb_health.status_code | default(0) | int) in jenkins_health_status_codes)
+         and ((_rb_health.x_jenkins is not defined) or (_rb_health.x_jenkins == jenkins_restore_manifest.from_version)) }}
     jenkins_result: ROLLED_BACK
 
 - name: Write rollback record
   ansible.windows.win_copy:
-    content: "{{ {'rolled_back_at': now(utc=true).isoformat(), 'healthy': jenkins_rollback_healthy, 'reason': jenkins_failure_reason | default('manual rollback')} | to_nice_json }}"
+    content: >-
+      {{ {'rolled_back_at': now(utc=true).isoformat(), 'healthy': jenkins_rollback_healthy | bool,
+          'running_version': jenkins_rollback_version, 'expected_version': jenkins_restore_manifest.from_version,
+          'home_restored': jenkins_rollback_restore_home | bool,
+          'reason': jenkins_failure_reason | default('manual rollback')} | to_nice_json }}
     dest: "{{ jenkins_restore_dir }}\\rollback.json"
 
 - name: Rollback result
   ansible.builtin.fail:
-    msg: "Rollback finished but Jenkins is NOT healthy at {{ jenkins_restore_manifest.health_url }}. Manual intervention required; backup is in {{ jenkins_restore_dir }}."
+    msg: >-
+      Rollback finished but Jenkins is NOT healthy at {{ jenkins_restore_manifest.health_url }}
+      (running version '{{ jenkins_rollback_version }}', expected {{ jenkins_restore_manifest.from_version }}).
+      Manual intervention required; backup is in {{ jenkins_restore_dir }}.
   when: not (jenkins_rollback_healthy | bool)

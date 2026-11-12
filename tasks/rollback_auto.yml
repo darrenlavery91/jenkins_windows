@@ -17,3 +17,19 @@
   when:
     - not (jenkins_backup_done | default(false) | bool)
     - jenkins_stopped_by_role | default(false) | bool
+
+- name: Failed before the stop - leave quiet-down mode so builds can run again
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Invoke-JenkinsApi.ps1') }}"
+    parameters:
+      BaseUrl: "{{ jenkins_url }}"
+      Path: /cancelQuietDown
+      Method: POST
+      User: "{{ jenkins_admin_user }}"
+      Token: "{{ jenkins_admin_api_token }}"
+      ValidateCerts: "{{ jenkins_validate_certs | bool }}"
+  no_log: "{{ jenkins_no_log }}"
+  failed_when: false
+  when:
+    - jenkins_quieted_by_role | default(false) | bool
+    - not (jenkins_stopped_by_role | default(false) | bool)

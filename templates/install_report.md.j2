@@ -1,0 +1,64 @@
+# Jenkins install report - {{ inventory_hostname }}
+
+| | |
+|---|---|
+| Result | **{{ jenkins_result | default('PLAN ONLY' if jenkins_plan_only | bool else 'UNKNOWN') }}** |
+| Run id | {{ jenkins_run_id }} |
+| Jenkins | {{ jenkins_target_version }}{{ ' (already installed - converged)' if (jenkins_current_version | default('') | length > 0) else '' }} |
+| URL | {{ jenkins_url }} (port {{ jenkins_http_port }}) |
+| Service | {{ jenkins_service_name }} ({{ 'existed' if jenkins_service_existed | default(false) | bool else 'created' }}), start mode {{ jenkins_service_start_mode }}, account {{ jenkins_service_user if jenkins_service_user | length > 0 else 'LocalSystem' }} |
+| Install dir | {{ jenkins_install_dir }} (WinSW: jenkins.exe + jenkins.xml) |
+| WAR | {{ jenkins_war_dest | default('?') }}{% if jenkins_war_info is defined %} - sha256 {{ jenkins_war_info.sha256 }}{% endif %} |
+| JENKINS_HOME | {{ jenkins_home }} ({{ 'fresh' if jenkins_install_fresh_home | default(true) | bool else 'existing configuration reused' }}{{ ', restricted to SYSTEM/Administrators' if (jenkins_install_restrict_home_acl | bool and jenkins_install_fresh_home | default(true) | bool) else '' }}) |
+| Java supported by this version | {{ jenkins_supported_java_majors | default([]) | join(', ') }} |
+| Java used | {% if jenkins_java_selected is defined %}{{ jenkins_java_selected.version }} ({{ jenkins_java_selected.home }}){% else %}Java {{ jenkins_java_major_selected | default('?') }} (to be installed){% endif %} |
+| Java installed by this run | {{ 'yes' if jenkins_java_installed_by_role | default(false) | bool else 'no' }} |
+| Firewall | {{ ('inbound TCP ' ~ jenkins_http_port ~ ' allowed (rule "' ~ jenkins_firewall_rule_name | default('') ~ '")') if jenkins_install_firewall | bool else 'not changed' }} |
+{% if jenkins_install_fresh_home | default(true) | bool %}
+| First login | {{ ('setup wizard skipped; admin user "' ~ jenkins_admin_user ~ '" created, anonymous access off') if jenkins_install_skip_wizard | default(false) | bool else ('setup wizard - unlock with ' ~ jenkins_home ~ '\\secrets\\initialAdminPassword') }} |
+{% endif %}
+{% if jenkins_failure_reason is defined %}
+| Failure | {{ jenkins_failure_reason | replace('\n', ' ') | truncate(400) }} |
+{% endif %}
+
+{% if jenkins_warnings | default([]) | length > 0 %}
+## Warnings
+{% for w in jenkins_warnings %}
+- {{ w }}
+{% endfor %}
+
+{% endif %}
+{% if jenkins_install_plugins | length > 0 %}
+## Plugin install
+
+Requested: {{ jenkins_install_plugins | join(', ') }}
+{% if jenkins_install_plugins_missing is defined %}
+Missing before this run: {{ jenkins_install_plugins_missing | join(', ') or 'none (all already installed)' }}
+{% endif %}
+{% if jenkins_plugin_update_rc is defined %}
+CLI exit code: {{ jenkins_plugin_update_rc }}
+{% else %}
+Not run{{ ' (setup wizard mode: no credentials)' if not (jenkins_install_skip_wizard | default(false) | bool) else '' }}.
+{% endif %}
+{% if jenkins_failed_plugins | default([]) | length > 0 %}
+
+Failed / inactive after restart:
+{% for f in jenkins_failed_plugins %}
+- {{ f.kind }} {{ f.name }}: {{ f.detail }}
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% if jenkins_plugins_final is defined %}
+## Installed plugins ({{ jenkins_plugins_final | length }})
+
+{% if jenkins_plugins_final | length == 0 %}
+None.
+{% else %}
+| Plugin | Version |
+|---|---|
+{% for p in jenkins_plugins_final | sort(attribute='name') %}
+| {{ p.name }} | {{ p.version }} |
+{% endfor %}
+{% endif %}
+{% endif %}

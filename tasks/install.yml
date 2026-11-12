@@ -1,0 +1,450 @@
+---
+# jenkins_mode: install - fresh install (or converge) of the WAR as a WinSW
+# service, in the same layout as the official MSI:
+#   <install_dir>\jenkins.exe (WinSW)  jenkins.xml  jenkins-<version>.war
+# so jenkins_mode=upgrade and rollback work on the result unchanged.
+# Read-only until the "Install Jenkins" block (plan-only stops before it).
+
+- name: Install layout and credentials
+  ansible.builtin.set_fact:
+    jenkins_startup_script: '{{ jenkins_install_dir }}\jenkins.xml'
+    jenkins_startup_kind: winsw
+    jenkins_winsw_exe: '{{ jenkins_install_dir }}\jenkins.exe'
+    jenkins_bootstrap_script_name: zz-ansible-bootstrap-admin.groovy
+    jenkins_install_skip_wizard: "{{ (jenkins_admin_user | length > 0) and (jenkins_admin_secret | length > 0) }}"
+    jenkins_firewall_rule_name: 'Jenkins ({{ jenkins_service_name }})'
+    # Before the first start the only credential is the password we create.
+    jenkins_admin_api_token: "{{ jenkins_admin_secret }}"
+    jenkins_has_api_creds: "{{ (jenkins_admin_user | length > 0) and (jenkins_admin_secret | length > 0) }}"
+
+# ------------------------------------------------------------------ preflight
+- name: Look up the Jenkins service
+  ansible.windows.win_service:
+    name: "{{ jenkins_service_name }}"
+  register: _jenkins_svc
+  check_mode: false
+
+- name: Inspect install dir, JENKINS_HOME and port
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$Xml, [string]$JenkinsHome, [int]$Port)
+      $listen = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+      $owner = ''
+      if ($listen.Count -gt 0) {
+          $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($listen[0].OwningProcess)" -ErrorAction SilentlyContinue
+          $owner = if ($p) { [string]$p.CommandLine } else { "pid $($listen[0].OwningProcess)" }
+      }
+      $Ansible.Result = @{
+          xml_exists      = Test-Path -LiteralPath $Xml
+          home_exists     = Test-Path -LiteralPath $JenkinsHome
+          home_has_config = Test-Path -LiteralPath (Join-Path $JenkinsHome 'config.xml')
+          port_in_use     = $listen.Count -gt 0
+          port_owner      = $owner
+      }
+    parameters:
+      Xml: "{{ jenkins_startup_script }}"
+      JenkinsHome: "{{ jenkins_home }}"
+      Port: "{{ jenkins_http_port | int }}"
+  register: _pre
+  changed_when: false
+  check_mode: false
+
+- name: Read the existing jenkins.xml
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsStartup.ps1') }}"
+    parameters:
+      Path: "{{ jenkins_startup_script }}"
+      Kind: winsw
+      ServiceAccount: "{{ _jenkins_svc.username | default('') }}"
+  register: _existing
+  changed_when: false
+  check_mode: false
+  when: _pre.result.xml_exists | bool
+
+- name: Record what is already there
+  ansible.builtin.set_fact:
+    jenkins_current_war: "{{ (_existing.result.war_paths | default([])) | first | default('') }}"
+    jenkins_current_version: >-
+      {{ ((_existing.result.war_versions | default([])) | first | default(_existing.result.manifest_version | default(''), true))
+         if (_pre.result.xml_exists | bool) else '' }}
+    jenkins_install_fresh_home: "{{ not (_pre.result.home_has_config | bool) }}"
+    jenkins_service_existed: "{{ _jenkins_svc.exists | bool }}"
+
+- name: Refuse to install over something else
+  ansible.builtin.assert:
+    that:
+      - not (_jenkins_svc.exists | bool) or ((_jenkins_svc.path | default('') | lower) is search(jenkins_winsw_exe | lower | regex_escape))
+      - jenkins_current_version | length == 0 or jenkins_current_version == jenkins_target_version
+      - not (_pre.result.port_in_use | bool) or (_jenkins_svc.exists | bool and _jenkins_svc.state == 'running')
+    fail_msg: >-
+      {% if _jenkins_svc.exists | bool and not ((_jenkins_svc.path | default('') | lower) is search(jenkins_winsw_exe | lower | regex_escape)) %}
+      Service '{{ jenkins_service_name }}' already exists but runs '{{ _jenkins_svc.path }}', not {{ jenkins_winsw_exe }}.
+      Uninstall it first (jenkins_mode=uninstall) or upgrade it in place (jenkins_mode=upgrade).
+      {% elif jenkins_current_version | length > 0 and jenkins_current_version != jenkins_target_version %}
+      Jenkins {{ jenkins_current_version }} is already installed in {{ jenkins_install_dir }}. Use jenkins_mode=upgrade
+      to move it to {{ jenkins_target_version }} (with backup and rollback).
+      {% else %}
+      Port {{ jenkins_http_port }} is already in use by: {{ _pre.result.port_owner | truncate(200) }}. Pick another jenkins_http_port.
+      {% endif %}
+    quiet: true
+
+- name: Note a reused JENKINS_HOME
+  ansible.builtin.set_fact:
+    jenkins_warnings: >-
+      {{ jenkins_warnings + ['JENKINS_HOME ' ~ jenkins_home ~ ' already contains a Jenkins configuration: it is reused as is (no admin bootstrap, no ACL change).'] }}
+  when:
+    - not (jenkins_install_fresh_home | bool)
+    - not (jenkins_service_existed | bool)
+
+- name: Note that the setup wizard will run
+  ansible.builtin.set_fact:
+    jenkins_warnings: >-
+      {{ jenkins_warnings + ['No jenkins_admin_user/jenkins_admin_password: the setup wizard runs on first visit; jenkins_install_plugins were NOT installed. Unlock it with ' ~ jenkins_home ~ '\\secrets\\initialAdminPassword.'] }}
+  when:
+    - not (jenkins_install_skip_wizard | bool)
+    - jenkins_install_fresh_home | bool
+
+- name: Discover installed Java runtimes
+  ansible.builtin.include_tasks: java_discover.yml
+
+- name: Select Java for the target version
+  ansible.builtin.include_tasks: java_select.yml
+
+- name: Install plan
+  ansible.builtin.debug:
+    msg:
+      - "Install Jenkins {{ jenkins_target_version }} as service '{{ jenkins_service_name }}' ({{ 'exists - converge' if jenkins_service_existed | bool else 'new' }})"
+      - "Install dir {{ jenkins_install_dir }}, JENKINS_HOME {{ jenkins_home }} ({{ 'fresh' if jenkins_install_fresh_home | bool else 'existing config reused' }})"
+      - "Port {{ jenkins_http_port }}, URL {{ jenkins_url }}, account {{ jenkins_service_user if jenkins_service_user | length > 0 else 'LocalSystem' }}"
+      - "Java {{ jenkins_java_major_selected }} ({{ 'will be INSTALLED' if jenkins_java_needs_install | bool else 'already installed at ' ~ jenkins_java_selected.home }})"
+      - "Setup: {{ ('skip wizard, create admin ' ~ jenkins_admin_user) if (jenkins_install_skip_wizard | bool and jenkins_install_fresh_home | bool) else ('setup wizard' if jenkins_install_fresh_home | bool else 'existing configuration') }}"
+      - "Plugins to install: {{ jenkins_install_plugins | join(', ') if jenkins_install_plugins | length > 0 else 'none' }}"
+
+# --------------------------------------------------------------------- install
+- name: Install Jenkins
+  when: not (jenkins_plan_only | bool)
+  block:
+    - name: Create install dir and JENKINS_HOME
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ jenkins_install_dir }}"
+        - "{{ jenkins_home }}"
+
+    - name: Restrict JENKINS_HOME to SYSTEM and Administrators (it holds secrets)
+      when:
+        - jenkins_install_restrict_home_acl | bool
+        - jenkins_install_fresh_home | bool
+      block:
+        - name: Stop inheriting the parent folder's permissions
+          ansible.windows.win_acl_inheritance:
+            path: "{{ jenkins_home }}"
+            state: absent
+            reorganize: false
+
+        - name: Grant full control to SYSTEM and Administrators
+          ansible.windows.win_acl:
+            path: "{{ jenkins_home }}"
+            user: "{{ item }}"
+            rights: FullControl
+            type: allow
+            state: present
+            inherit: ContainerInherit, ObjectInherit
+            propagation: None
+          loop: [SYSTEM, Administrators]
+
+    - name: Ensure the right Java is installed
+      ansible.builtin.include_tasks: java.yml
+
+    - name: Stage and verify the WAR
+      ansible.builtin.include_tasks: stage_war.yml
+
+    - name: Push the WinSW service wrapper from the controller
+      ansible.windows.win_copy:
+        src: "{{ jenkins_winsw_controller_file }}"
+        dest: "{{ jenkins_winsw_exe }}"
+      register: _winsw_push
+      when: jenkins_winsw_controller_file | length > 0
+
+    - name: Download the WinSW service wrapper
+      ansible.windows.win_get_url:
+        url: "{{ jenkins_winsw_url }}"
+        dest: "{{ jenkins_winsw_exe }}"
+        checksum: "{{ jenkins_winsw_sha256 | default(omit, true) }}"
+        checksum_algorithm: sha256
+      register: _winsw_dl
+      when: jenkins_winsw_controller_file | length == 0
+
+    - name: Check the WinSW checksum
+      ansible.windows.win_stat:
+        path: "{{ jenkins_winsw_exe }}"
+        get_checksum: true
+        checksum_algorithm: sha256
+      register: _winsw_stat
+
+    - name: Fail when WinSW is not the expected binary
+      ansible.builtin.assert:
+        that: jenkins_winsw_sha256 | length == 0 or (_winsw_stat.stat.checksum | lower) == (jenkins_winsw_sha256 | lower)
+        fail_msg: "{{ jenkins_winsw_exe }} has SHA-256 {{ _winsw_stat.stat.checksum }}, expected {{ jenkins_winsw_sha256 }}."
+        quiet: true
+
+    - name: First-start admin bootstrap (skips the setup wizard)
+      when:
+        - jenkins_install_skip_wizard | bool
+        - jenkins_install_fresh_home | bool
+      block:
+        - name: Create init.groovy.d
+          ansible.windows.win_file:
+            path: "{{ jenkins_home }}\\init.groovy.d"
+            state: directory
+
+        - name: Write the self-deleting admin bootstrap script
+          ansible.windows.win_template:
+            src: bootstrap-admin.groovy.j2
+            dest: "{{ jenkins_home }}\\init.groovy.d\\{{ jenkins_bootstrap_script_name }}"
+          no_log: "{{ jenkins_no_log }}"
+
+    - name: Write the WinSW service definition (jenkins.xml)
+      ansible.windows.win_template:
+        src: jenkins.xml.j2
+        dest: "{{ jenkins_startup_script }}"
+      register: _xml
+
+    - name: Check upgrade mode will understand this jenkins.xml
+      ansible.windows.win_powershell:
+        script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsStartup.ps1') }}"
+        parameters:
+          Path: "{{ jenkins_startup_script }}"
+          Kind: winsw
+          ServiceAccount: "{{ jenkins_service_user if jenkins_service_user | length > 0 else 'LocalSystem' }}"
+      register: _xml_check
+      changed_when: false
+
+    - name: Fail when jenkins.xml does not round-trip
+      ansible.builtin.assert:
+        that:
+          - (_xml_check.result.war_paths | first | default('') | lower) == (jenkins_war_dest | lower)
+          - (_xml_check.result.manifest_version | default('')) == jenkins_target_version
+          - (_xml_check.result.jenkins_home_env | lower) == (jenkins_home | lower)
+        fail_msg: "jenkins.xml was written but reads back as {{ _xml_check.result }}."
+        quiet: true
+
+    - name: Register the Windows service
+      ansible.windows.win_command: '"{{ jenkins_winsw_exe }}" install'
+      args:
+        chdir: "{{ jenkins_install_dir }}"
+      when: not (jenkins_service_existed | bool)
+
+    - name: Service account
+      when: jenkins_service_user | length > 0
+      block:
+        - name: Allow the service account to log on as a service
+          ansible.windows.win_user_right:
+            name: SeServiceLogonRight
+            users: ["{{ jenkins_service_user }}"]
+            action: add
+
+        - name: Give the service account full control of JENKINS_HOME
+          ansible.windows.win_acl:
+            path: "{{ jenkins_home }}"
+            user: "{{ jenkins_service_user }}"
+            rights: FullControl
+            type: allow
+            state: present
+            inherit: ContainerInherit, ObjectInherit
+            propagation: None
+
+        - name: Let the service account write its logs in the install dir
+          ansible.windows.win_acl:
+            path: "{{ jenkins_install_dir }}"
+            user: "{{ jenkins_service_user }}"
+            rights: Modify
+            type: allow
+            state: present
+            inherit: ContainerInherit, ObjectInherit
+            propagation: None
+
+    - name: Configure the service (start mode, display name, account)
+      ansible.windows.win_service:
+        name: "{{ jenkins_service_name }}"
+        display_name: "{{ jenkins_service_display_name }}"
+        start_mode: "{{ jenkins_service_start_mode }}"
+        username: "{{ jenkins_service_user if jenkins_service_user | length > 0 else omit }}"
+        password: "{{ jenkins_service_password if jenkins_service_user | length > 0 else omit }}"
+      register: _svc_cfg
+      no_log: "{{ jenkins_no_log }}"
+
+    - name: Open the Jenkins port in Windows Firewall
+      community.windows.win_firewall_rule:
+        name: "{{ jenkins_firewall_rule_name }}"
+        description: Jenkins HTTP (managed by Ansible jenkins_windows)
+        localport: "{{ jenkins_http_port }}"
+        protocol: tcp
+        direction: in
+        action: allow
+        profiles: "{{ jenkins_install_firewall_profiles }}"
+        state: present
+        enabled: true
+      when: jenkins_install_firewall | bool
+
+    - name: Restart Jenkins to apply changed files / settings
+      ansible.windows.win_service:
+        name: "{{ jenkins_service_name }}"
+        state: restarted
+      when:
+        - jenkins_service_existed | bool
+        - _jenkins_svc.state == 'running'
+        - (_xml is changed) or (_winsw_push is changed) or (_winsw_dl is changed)
+          or (jenkins_war_staged_changed | bool) or (_svc_cfg is changed)
+
+    - name: Start and verify
+      ansible.builtin.include_tasks: start_verify.yml
+
+    - name: Wizard mode - read the initial admin password
+      when:
+        - not (jenkins_install_skip_wizard | bool)
+        - jenkins_install_fresh_home | bool
+      block:
+        - name: Wait for the initial admin password file
+          ansible.windows.win_stat:
+            path: "{{ jenkins_home }}\\secrets\\initialAdminPassword"
+            get_checksum: false
+          register: _iap
+          until: _iap.stat.exists
+          retries: 12
+          delay: 5
+
+        - name: Read the initial admin password
+          ansible.builtin.slurp:
+            src: "{{ jenkins_home }}\\secrets\\initialAdminPassword"
+          register: _iap_content
+
+        - name: Record it
+          ansible.builtin.set_fact:
+            jenkins_initial_admin_password: "{{ _iap_content.content | b64decode | trim }}"
+
+    - name: Bootstrap mode - prove security is on and the admin can log in
+      when:
+        - jenkins_install_skip_wizard | bool
+        - jenkins_install_fresh_home | bool
+      block:
+        - name: Bootstrap script removed itself
+          ansible.windows.win_stat:
+            path: "{{ jenkins_home }}\\init.groovy.d\\{{ jenkins_bootstrap_script_name }}"
+            get_checksum: false
+          register: _boot_left
+
+        - name: Anonymous access is refused
+          ansible.windows.win_uri:
+            url: "{{ jenkins_url }}/api/json"
+            validate_certs: "{{ jenkins_validate_certs }}"
+            status_code: [200, 401, 403]
+          register: _anon
+
+        - name: Admin can log in
+          ansible.windows.win_uri:
+            url: "{{ jenkins_url }}/whoAmI/api/json"
+            url_username: "{{ jenkins_admin_user }}"
+            url_password: "{{ jenkins_admin_secret }}"
+            force_basic_auth: true
+            validate_certs: "{{ jenkins_validate_certs }}"
+            return_content: true
+            status_code: [200, 401, 403]
+          register: _whoami
+          no_log: "{{ jenkins_no_log }}"
+
+        - name: Fail when the bootstrap did not take effect
+          ansible.builtin.assert:
+            that:
+              - not _boot_left.stat.exists
+              - _anon.status_code in [401, 403]
+              - _whoami.status_code == 200
+              - _whoami.json.authenticated | default(false) | bool
+              - _whoami.json.name | default('') == jenkins_admin_user
+            fail_msg: >-
+              Admin bootstrap failed: script still present={{ _boot_left.stat.exists }},
+              anonymous HTTP {{ _anon.status_code }} (want 401/403), admin login HTTP {{ _whoami.status_code }}
+              as '{{ _whoami.json.name | default('?') }}'. See {{ jenkins_install_dir }}\jenkins.err.log.
+            quiet: true
+
+    - name: Plugins already installed
+      ansible.windows.win_powershell:
+        script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsPlugins.ps1') }}"
+        parameters:
+          JenkinsHome: "{{ jenkins_home }}"
+        depth: 3
+      register: _plugins_now
+      changed_when: false
+      when: jenkins_install_plugins | length > 0
+
+    - name: Work out which requested plugins are missing (re-runs install only those)
+      ansible.builtin.set_fact:
+        jenkins_install_plugins_missing: >-
+          {{ jenkins_install_plugins | reject('in', _plugins_now.output | default([]) | map(attribute='name') | list)
+             | reject('search', '^(' ~ (_plugins_now.output | default([]) | map(attribute='name') | map('regex_escape') | join('|') or '$^') ~ '):') | list }}
+
+    - name: Install the missing plugins
+      ansible.builtin.include_tasks: plugins_cli.yml
+      vars:
+        jenkins_cli_plugins: "{{ jenkins_install_plugins_missing }}"
+        jenkins_cli_jar: "{{ jenkins_install_dir }}\\jenkins-cli.jar"
+      when:
+        - jenkins_install_plugins_missing | length > 0
+        - jenkins_install_skip_wizard | bool
+
+    - name: Fail when the plugin install failed
+      ansible.builtin.assert:
+        that: (jenkins_plugin_update_rc | default(0) | int) == 0
+        fail_msg: "Plugin install failed (CLI exit {{ jenkins_plugin_update_rc | default('?') }}): {{ jenkins_plugin_update_output | default([]) | join(' ') | truncate(600) }}"
+        quiet: true
+
+    - name: Final plugin inventory
+      ansible.windows.win_powershell:
+        script: "{{ lookup('ansible.builtin.file', 'Get-JenkinsPlugins.ps1') }}"
+        parameters:
+          JenkinsHome: "{{ jenkins_home }}"
+        depth: 3
+      register: _plugins_final
+      changed_when: false
+
+    - name: Installed
+      ansible.builtin.set_fact:
+        jenkins_plugins_final: "{{ _plugins_final.output }}"
+        jenkins_result: SUCCESS
+
+  rescue:
+    - name: Remember why we failed
+      ansible.builtin.set_fact:
+        jenkins_result: FAILED
+        jenkins_failure_reason: "{{ ansible_failed_task.name | default('unknown task') }}: {{ ansible_failed_result.msg | default('no message') }}"
+
+    - name: Fail the host
+      ansible.builtin.fail:
+        msg: >-
+          Jenkins install failed ({{ jenkins_failure_reason }}). Fix the cause and re-run: the install
+          converges. Service logs: {{ jenkins_install_dir }}\jenkins.err.log / jenkins.wrapper.log.
+
+  always:
+    - name: Never leave the admin password on disk
+      ansible.windows.win_file:
+        path: "{{ jenkins_home }}\\init.groovy.d\\{{ jenkins_bootstrap_script_name }}"
+        state: absent
+      failed_when: false
+      when: not (jenkins_plan_only | bool)
+
+    - name: Write install report
+      ansible.builtin.include_tasks: report.yml
+      vars:
+        jenkins_report_template: install_report.md.j2
+        jenkins_report_name: "{{ inventory_hostname }}_install_{{ jenkins_run_id }}.md"
+
+- name: How to log in
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Open ' ~ jenkins_url ~ ' and log in as ' ~ jenkins_admin_user ~ '.'
+         if (jenkins_install_skip_wizard | bool or not (jenkins_install_fresh_home | bool))
+         else 'Open ' ~ jenkins_url ~ ' and unlock the setup wizard with: ' ~ (jenkins_initial_admin_password | default('?')) }}
+  when:
+    - not (jenkins_plan_only | bool)
+    - jenkins_result | default('') == 'SUCCESS'

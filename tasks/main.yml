@@ -1,19 +1,30 @@
 ---
-# Entry point: plan (always) -> execute (unless jenkins_plan_only) -> report.
+# Entry point. jenkins_mode: upgrade (plan -> execute -> report), install, uninstall.
 - name: Validate inputs
   ansible.builtin.include_tasks: validate.yml
   tags: [always]
 
-- name: Discover current state (service, Java, plugins, update center)
-  ansible.builtin.include_tasks: discover.yml
+- name: Install Jenkins
+  ansible.builtin.include_tasks: install.yml
+  when: jenkins_mode == 'install'
 
-- name: Build compatibility plan (Java + plugins + disk)
-  ansible.builtin.include_tasks: plan.yml
+- name: Uninstall Jenkins
+  ansible.builtin.include_tasks: uninstall.yml
+  when: jenkins_mode == 'uninstall'
 
-- name: Execute upgrade (backup, stop, switch, start, verify, rollback on failure)
-  ansible.builtin.include_tasks: execute.yml
-  when: not (jenkins_plan_only | bool)
+- name: Upgrade Jenkins
+  when: jenkins_mode == 'upgrade'
+  block:
+    - name: Discover current state (service, Java, plugins, update center)
+      ansible.builtin.include_tasks: discover.yml
 
-- name: Plan-only report
-  ansible.builtin.include_tasks: report.yml
-  when: jenkins_plan_only | bool
+    - name: Build compatibility plan (Java + plugins + disk)
+      ansible.builtin.include_tasks: plan.yml
+
+    - name: Execute upgrade (backup, stop, switch, start, verify, rollback on failure)
+      ansible.builtin.include_tasks: execute.yml
+      when: not (jenkins_plan_only | bool)
+
+    - name: Plan-only report
+      ansible.builtin.include_tasks: report.yml
+      when: jenkins_plan_only | bool

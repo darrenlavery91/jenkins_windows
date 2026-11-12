@@ -3,17 +3,34 @@
   when:
     - jenkins_quiet_down | bool
     - jenkins_has_api_creds | bool
-    - _jenkins_svc.state == 'started'
+    - _jenkins_svc.state in ['running', 'started']   # win_service reports 'running'
   block:
     - name: Enter quiet-down mode (no new builds)
-      ansible.windows.win_uri:
-        url: "{{ jenkins_url }}/quietDown"
-        method: POST
-        url_username: "{{ jenkins_admin_user }}"
-        url_password: "{{ jenkins_admin_api_token }}"
-        force_basic_auth: true
-        validate_certs: "{{ jenkins_validate_certs }}"
+      ansible.windows.win_powershell:
+        script: "{{ lookup('ansible.builtin.file', 'Invoke-JenkinsApi.ps1') }}"
+        parameters:
+          BaseUrl: "{{ jenkins_url }}"
+          Path: /quietDown
+          Method: POST
+          User: "{{ jenkins_admin_user }}"
+          Token: "{{ jenkins_admin_api_token }}"
+          ValidateCerts: "{{ jenkins_validate_certs | bool }}"
+      register: _qd
       no_log: "{{ jenkins_no_log }}"
+
+    # Set before checking the answer: the POST may have worked even if the reply
+    # looked wrong, and the rescue path must then cancel quiet-down.
+    - name: Remember Jenkins may be in quiet-down (cancelled again if we fail before stopping)
+      ansible.builtin.set_fact:
+        jenkins_quieted_by_role: true
+
+    - name: Fail when quiet-down was refused
+      ansible.builtin.assert:
+        that: _qd.result.ok | bool
+        fail_msg: >-
+          POST {{ jenkins_url }}/quietDown returned HTTP {{ _qd.result.status }}. Check jenkins_url,
+          jenkins_admin_user and jenkins_admin_api_token (user needs Overall/Administer). Detail: {{ _qd.result.content | default("") | truncate(200) }}
+        quiet: true
 
     - name: Wait for executors to become idle
       ansible.windows.win_uri:
@@ -35,7 +52,11 @@
         that: (_busy.json.busyExecutors | default(0) | int) == 0 or (jenkins_quiet_down_force | bool)
         fail_msg: "Builds are still running after {{ jenkins_quiet_down_timeout }}s and jenkins_quiet_down_force=false."
         quiet: true
-      no_log: "{{ jenkins_no_log }}"
+
+    - name: Warn when builds will be aborted
+      ansible.builtin.set_fact:
+        jenkins_warnings: "{{ jenkins_warnings + [(_busy.json.busyExecutors | default(0)) ~ ' build(s) still running after ' ~ jenkins_quiet_down_timeout ~ 's - they were aborted by the stop.'] }}"
+      when: (_busy.json.busyExecutors | default(0) | int) > 0
 
 - name: Warn when no drain was possible
   ansible.builtin.set_fact:

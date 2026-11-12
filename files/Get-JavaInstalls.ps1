@@ -43,8 +43,24 @@ foreach ($exe in @($candidates.Keys)) {
         continue
     }
 
-    $raw  = @(& $exe -version 2>&1 | ForEach-Object { "$_" })
-    $text = $raw -join "`n"
+    # java -version writes to stderr. "& $exe -version 2>&1" returns nothing inside
+    # win_powershell's runspace, so run the process with stderr redirected explicitly.
+    $text = ''
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.Arguments = '-version'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardError = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stderr = $proc.StandardError.ReadToEndAsync()
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        if (-not $proc.WaitForExit(30000)) { $proc.Kill() }
+        $text = ($stderr.Result + "`n" + $stdout).Trim()
+    } catch { continue }
+    $raw  = @($text -split "\r?\n" | Where-Object { $_ })
     if ($text -notmatch 'version "(?<v>[^"]+)"') { continue }
     $ver   = $Matches['v']
     $parts = @([regex]::Matches($ver, '\d+') | ForEach-Object { [int64]$_.Value })

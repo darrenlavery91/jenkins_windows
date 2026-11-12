@@ -1,0 +1,20 @@
+---
+# Keep JENKINS_HOME:   ansible-playbook uninstall.yml
+# Remove everything:   ansible-playbook uninstall.yml -e jenkins_uninstall_remove_home=true
+#                      (JENKINS_HOME is copied to <jenkins_backup_dir>\<run_id>-uninstall and verified first)
+# Also removes an MSI-installed Jenkins (service + product); Java is left installed.
+- name: Uninstall Jenkins from Windows
+  hosts: jenkins_windows
+  gather_facts: false
+
+  vars:
+    jenkins_mode: uninstall
+    jenkins_service_name: Jenkins
+    jenkins_install_dir: 'C:\Program Files\Jenkins'
+    jenkins_home: 'C:\ProgramData\Jenkins\.jenkins'
+    jenkins_backup_dir: 'D:\Jenkins_Backups'
+    # Old MSI installs also keep a webroot/pid under the service profile:
+    # jenkins_uninstall_extra_paths: ['C:\Windows\System32\config\systemprofile\AppData\Local\Jenkins']
+
+  roles:
+    - role: jenkins_windows

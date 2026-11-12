@@ -1,0 +1,27 @@
+---
+# 1) Dry run first:   ansible-playbook install.yml -e jenkins_plan_only=true
+# 2) Then for real:   ansible-playbook install.yml
+# Re-running converges. To change version later use upgrade.yml (same variables).
+- name: Install Jenkins on Windows
+  hosts: jenkins_windows
+  gather_facts: false
+
+  vars:
+    jenkins_mode: install
+    jenkins_target_version: "2.541.3"
+    jenkins_service_name: Jenkins
+    jenkins_install_dir: 'C:\Program Files\Jenkins'
+    jenkins_home: 'C:\ProgramData\Jenkins\.jenkins'
+    jenkins_backup_dir: 'D:\Jenkins_Backups'     # used later by upgrade/uninstall
+    jenkins_http_port: 8080
+    jenkins_url: 'http://jenkins01.example.com:8080'   # becomes the Jenkins URL
+    # jenkins_war_controller_file: files/jenkins.war  # omit to download from get.jenkins.io
+    # Admin created on first start (wizard skipped). Omit both to get the setup wizard.
+    jenkins_admin_user: admin
+    jenkins_admin_password: "{{ vault_jenkins_admin_password }}"
+    jenkins_install_plugins: [git, workflow-aggregator, credentials-binding, timestamper]
+    # jenkins_service_user: 'DOMAIN\svc-jenkins'
+    # jenkins_service_password: "{{ vault_jenkins_service_password }}"
+
+  roles:
+    - role: jenkins_windows

@@ -10,6 +10,10 @@ jenkins_home: ""
 # =============================================================================
 # MODES
 # =============================================================================
+# upgrade   = upgrade/downgrade an existing Jenkins (default)
+# install   = fresh install of the WAR as a WinSW service (see INSTALL below)
+# uninstall = remove the service, MSI, install dir (and optionally JENKINS_HOME)
+jenkins_mode: upgrade
 # true = run discovery + compatibility + plugin analysis + disk check, write the
 # report, change NOTHING on the server.
 jenkins_plan_only: false
@@ -21,8 +25,13 @@ jenkins_force_same_version: false
 # =============================================================================
 jenkins_service_name: Jenkins_Server
 jenkins_install_dir: 'E:\Jenkins\server'
+# Either a .bat start script or a WinSW service XML. The official Jenkins MSI
+# installs WinSW: jenkins_startup_script: 'C:\Program Files\Jenkins\jenkins.xml'
 jenkins_startup_script: '{{ jenkins_install_dir }}\start.jenkins.bat'
-# Only needed if the version cannot be read from the startup script.
+# auto = winsw when jenkins_startup_script ends in .xml, otherwise bat
+jenkins_startup_type: auto        # auto | bat | winsw
+# Only needed if the version cannot be read from the startup script's WAR name
+# or from the WAR's own manifest.
 jenkins_current_version_override: ""
 
 # =============================================================================
@@ -31,6 +40,8 @@ jenkins_current_version_override: ""
 # Folder (UNC or local) containing jenkins-<version>.war. Leave empty to download
 # from get.jenkins.io (weekly -> /war/, LTS (3-part version) -> /war-stable/).
 jenkins_war_source_dir: ""
+# Path ON THE CONTROLLER to a WAR to push to the server (wins over the two above).
+jenkins_war_controller_file: ""
 jenkins_war_download_url: ""      # override the computed download URL
 jenkins_war_sha256: ""            # optional: pin the expected SHA-256
 jenkins_war_download_timeout: 600
@@ -83,6 +94,9 @@ jenkins_rollback_on_failure: true
 jenkins_rollback_restore_home: true # restore JENKINS_HOME too (config/plugins)
 # Standalone rollback (tasks_from: rollback): empty = newest backup.
 jenkins_rollback_backup_id: ""
+# Rollback drills: fail on purpose at a point in the run to prove the rescue path.
+# '' (off) | before_stop | after_backup | after_start
+jenkins_simulate_failure: ""
 
 # =============================================================================
 # SHUTDOWN BEHAVIOUR
@@ -120,6 +134,51 @@ jenkins_update_center_url: 'https://updates.jenkins.io'
 # Offline: path (on the controller) to a saved update-center.actual.json
 jenkins_update_center_file: ""
 jenkins_cli_extra_args: '-webSocket'
+
+# =============================================================================
+# INSTALL  (jenkins_mode: install)
+# =============================================================================
+# Lays down the same layout as the official MSI: <install_dir>\jenkins.exe (WinSW)
+# + jenkins.xml + jenkins-<version>.war, so upgrade/rollback work on it unchanged.
+# The WAR comes from the WAR SOURCE settings above. Re-running converges; a
+# service already running a DIFFERENT version is refused (use jenkins_mode=upgrade).
+jenkins_http_port: 8080
+jenkins_service_display_name: '{{ jenkins_service_name }}'
+jenkins_service_start_mode: auto      # auto | delayed | manual
+# '' = LocalSystem (like the MSI). Otherwise '.\jenkins' or 'DOMAIN\svc-jenkins':
+# the role grants "Log on as a service" and full control of JENKINS_HOME.
+jenkins_service_user: ""
+jenkins_service_password: ""
+jenkins_install_java_opts: '-Xrs -Xmx1024m'
+jenkins_install_extra_args: ""        # extra Jenkins args, e.g. --httpListenAddress=0.0.0.0
+# JENKINS_HOME gets SYSTEM/Administrators(/service user) only - it holds secrets\.
+jenkins_install_restrict_home_acl: true
+jenkins_install_firewall: true        # inbound TCP rule for jenkins_http_port
+jenkins_install_firewall_profiles: [domain, private, public]
+# Setup wizard: when jenkins_admin_user + a password are set, the role skips the
+# wizard and creates that admin (first start only, via a self-deleting
+# init.groovy.d script), sets the Jenkins URL to jenkins_url and installs
+# jenkins_install_plugins. Otherwise the wizard runs and the report shows where
+# the initial admin password is.
+jenkins_admin_password: ""            # falls back to jenkins_admin_api_token
+jenkins_install_plugins: []           # e.g. [git, workflow-aggregator, timestamper]
+# WinSW service wrapper (the MSI ships WinSW too). .NET 4.6.1 build: present on
+# every supported Windows Server. Air-gapped: point the URL at a share or set
+# jenkins_winsw_controller_file.
+jenkins_winsw_url: 'https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW.NET461.exe'
+jenkins_winsw_sha256: 'b5066b7bbdfba1293e5d15cda3caaea88fbeab35bd5b38c41c913d492aadfc4f'
+jenkins_winsw_controller_file: ""
+
+# =============================================================================
+# UNINSTALL  (jenkins_mode: uninstall)
+# =============================================================================
+# Removes the service (WinSW or the Jenkins MSI), stray java.exe, the install dir
+# and the firewall rule. JENKINS_HOME is kept unless jenkins_uninstall_remove_home.
+jenkins_uninstall_remove_home: false
+# Copy JENKINS_HOME to <jenkins_backup_dir>\<run_id>-uninstall first (verified).
+jenkins_uninstall_backup_home: true
+# More folders to delete, e.g. the MSI's %LocalAppData%\Jenkins (webroot, pid).
+jenkins_uninstall_extra_paths: []
 
 # =============================================================================
 # REPORT

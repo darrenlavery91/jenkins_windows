@@ -1,0 +1,145 @@
+---
+# jenkins_mode: uninstall - remove the Jenkins service (WinSW layout or the
+# official MSI), stray java.exe, the install dir and the firewall rule.
+# JENKINS_HOME only with jenkins_uninstall_remove_home (backed up first by default).
+# Read-only until the "Uninstall Jenkins" block (plan-only stops before it).
+
+- name: Where JENKINS_HOME is copied before it is deleted
+  ansible.builtin.set_fact:
+    jenkins_uninstall_backup_path: '{{ jenkins_backup_dir }}\{{ jenkins_run_id }}-uninstall\home'
+
+- name: Look up the Jenkins service
+  ansible.windows.win_service:
+    name: "{{ jenkins_service_name }}"
+  register: _jenkins_svc
+  check_mode: false
+
+- name: Find what is installed
+  ansible.windows.win_powershell:
+    script: |
+      param([string]$InstallDir, [string]$JenkinsHome, [string[]]$Extra)
+      $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+      # The Jenkins MSI registers "Jenkins <version>"
+      $msi = @(Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+          Where-Object { $_.DisplayName -match '^Jenkins( \d+(\.\d+)*)?$' -and $_.PSChildName -match '^\{[0-9A-Fa-f-]+\}$' } |
+          ForEach-Object { @{ name = [string]$_.DisplayName; product_id = [string]$_.PSChildName } })
+      $Ansible.Result = @{
+          msi             = $msi
+          install_dir     = Test-Path -LiteralPath $InstallDir
+          home_exists     = ($JenkinsHome -ne '') -and (Test-Path -LiteralPath $JenkinsHome)
+          home_has_config = ($JenkinsHome -ne '') -and (Test-Path -LiteralPath (Join-Path $JenkinsHome 'config.xml'))
+          extra_existing  = @($Extra | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+      }
+    parameters:
+      InstallDir: "{{ jenkins_install_dir }}"
+      JenkinsHome: "{{ jenkins_home }}"
+      Extra: "{{ jenkins_uninstall_extra_paths }}"
+  register: _found
+  changed_when: false
+  check_mode: false
+
+- name: Refuse to delete something that is not a Jenkins home
+  ansible.builtin.assert:
+    that:
+      - jenkins_home is match('^[A-Za-z]:\\\\.+\\\\.+') or jenkins_home is match('^[A-Za-z]:\\\\[^\\\\]{3,}$')
+      - not (_found.result.home_exists | bool) or (_found.result.home_has_config | bool)
+    fail_msg: >-
+      jenkins_uninstall_remove_home is true but '{{ jenkins_home }}' is not a JENKINS_HOME
+      (no config.xml) or looks like a drive root. Nothing was changed.
+    quiet: true
+  when: jenkins_uninstall_remove_home | bool
+
+- name: Uninstall plan
+  ansible.builtin.debug:
+    msg:
+      - "Service '{{ jenkins_service_name }}': {{ ('remove (' ~ _jenkins_svc.state ~ ', ' ~ _jenkins_svc.path | default('') ~ ')') if _jenkins_svc.exists else 'not installed' }}"
+      - "MSI: {{ _found.result.msi | map(attribute='name') | join(', ') if _found.result.msi | length > 0 else 'none' }}"
+      - "Install dir {{ jenkins_install_dir }}: {{ 'delete' if _found.result.install_dir else 'not present' }}"
+      - "JENKINS_HOME {{ jenkins_home }}: {{ ('delete' ~ (' after a verified copy to ' ~ jenkins_uninstall_backup_path if jenkins_uninstall_backup_home | bool else ' WITHOUT backup')) if (jenkins_uninstall_remove_home | bool and _found.result.home_exists) else 'keep' }}"
+      - "Extra paths: {{ _found.result.extra_existing | join(', ') if _found.result.extra_existing | length > 0 else 'none' }}"
+      - "Firewall rule 'Jenkins ({{ jenkins_service_name }})': remove if present"
+
+- name: Uninstall Jenkins
+  when: not (jenkins_plan_only | bool)
+  block:
+    - name: Stop the Jenkins service
+      ansible.windows.win_service:
+        name: "{{ jenkins_service_name }}"
+        state: stopped
+      when: _jenkins_svc.exists
+
+    - name: Kill any java.exe still running a Jenkins WAR
+      ansible.windows.win_powershell:
+        script: |
+          $re = '-jar\s+(?:"[^"]*jenkins[^"]*\.war"|[^\s"]*jenkins[^\s"]*\.war)'
+          $procs = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re })
+          $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+          if ($procs.Count -gt 0) { Start-Sleep -Seconds 5 }
+          $Ansible.Changed = $procs.Count -gt 0
+          $Ansible.Result = @{ killed = $procs.Count }
+
+    - name: Back up JENKINS_HOME before deleting it
+      when:
+        - jenkins_uninstall_remove_home | bool
+        - jenkins_uninstall_backup_home | bool
+        - _found.result.home_exists | bool
+      block:
+        - name: Copy JENKINS_HOME
+          community.windows.win_robocopy:
+            src: "{{ jenkins_home }}"
+            dest: "{{ jenkins_uninstall_backup_path }}"
+            flags: "/E {{ jenkins_robocopy_flags }} /XD {{ jenkins_backup_exclude_dirs | join(' ') }}"
+          register: _rc
+          failed_when: (_rc.return_code | int) >= 8
+
+        - name: Verify the copy
+          ansible.windows.win_powershell:
+            script: "{{ lookup('ansible.builtin.file', 'Test-JenkinsBackup.ps1') }}"
+            parameters:
+              Backup: "{{ jenkins_uninstall_backup_path }}"
+              Source: "{{ jenkins_home }}"
+              ExcludeDirs: "{{ jenkins_backup_exclude_dirs }}"
+          register: _ucheck
+          changed_when: false
+
+        - name: Keep JENKINS_HOME when the copy is incomplete
+          ansible.builtin.assert:
+            that: _ucheck.result.ok | bool
+            fail_msg: "Backup of JENKINS_HOME is incomplete ({{ _ucheck.result.problems | join('; ') }}) - nothing deleted."
+            quiet: true
+
+    - name: Uninstall the Jenkins MSI
+      ansible.windows.win_package:
+        product_id: "{{ item.product_id }}"
+        state: absent
+      loop: "{{ _found.result.msi }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Remove the service (WinSW layout, or left behind by the MSI)
+      ansible.windows.win_service:
+        name: "{{ jenkins_service_name }}"
+        state: absent
+
+    - name: Delete the install dir, JENKINS_HOME and extra paths
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: absent
+      loop: >-
+        {{ [jenkins_install_dir]
+           + ([jenkins_home] if jenkins_uninstall_remove_home | bool else [])
+           + jenkins_uninstall_extra_paths }}
+
+    - name: Remove the firewall rule
+      community.windows.win_firewall_rule:
+        name: "Jenkins ({{ jenkins_service_name }})"
+        state: absent
+
+    - name: Uninstalled
+      ansible.builtin.debug:
+        msg: >-
+          Jenkins removed from {{ inventory_hostname }}.
+          {{ ('JENKINS_HOME copy: ' ~ jenkins_uninstall_backup_path ~ ' ('
+              ~ _ucheck.result.files ~ ' files).') if (_ucheck.result is defined) else '' }}
+          Java was left installed.

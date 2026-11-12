@@ -4,7 +4,7 @@
 # LTS 2.541.3 is evaluated as 2.541.  max_core = final weekly release with support.
 # Edit this table when the policy changes; no task logic needs touching.
 jenkins_java_support:
-  - { java: 8,  min_core: "2.54",  max_core: "2.356" }
+  - { java: 8, min_core: "2.54", max_core: "2.356" }
   - { java: 11, min_core: "2.164", max_core: "2.462" }
   - { java: 17, min_core: "2.340", max_core: "2.544" }   # final LTS 2.541.3
   - { java: 21, min_core: "2.463", max_core: null }      # first LTS 2.479.1

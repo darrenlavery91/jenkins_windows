@@ -1,0 +1,26 @@
+{%- macro x(s) -%}{{ s | string | replace('&', '&amp;') | replace('<', '&lt;') | replace('>', '&gt;') }}{%- endmacro -%}
+<!--
+  Windows service definition for Jenkins (WinSW), written by Ansible
+  (jenkins_windows role, jenkins_mode=install). Same layout as the official MSI.
+  jenkins_mode=upgrade later edits only the WAR path in the arguments, the
+  executable path and JAVA_HOME; anything else you change here is kept.
+-->
+<service>
+  <id>{{ x(jenkins_service_name) }}</id>
+  <name>{{ x(jenkins_service_display_name) }}</name>
+  <description>This service runs Jenkins automation server.</description>
+  <env name="JENKINS_HOME" value="{{ x(jenkins_home) }}"/>
+  <env name="JAVA_HOME" value="{{ x(jenkins_java_selected.home) }}"/>
+  <executable>{{ x(jenkins_java_selected.home) }}\bin\java.exe</executable>
+  <arguments>{{ x(jenkins_install_java_opts) }} -Dhudson.lifecycle=hudson.lifecycle.WindowsServiceLifecycle{{ ' -Djenkins.install.runSetupWizard=false' if jenkins_install_skip_wizard | bool else '' }} -jar "{{ x(jenkins_war_dest) }}" --httpPort={{ jenkins_http_port }} --webroot="{{ x(jenkins_home) }}\war"{{ (' ' ~ x(jenkins_install_extra_args)) if jenkins_install_extra_args | length > 0 else '' }}</arguments>
+  <logmode>rotate</logmode>
+  <onfailure action="restart"/>
+  <!-- Kill a java.exe leaked by a previous WinSW instance before starting a new one -->
+  <extensions>
+    <extension enabled="true" className="winsw.Plugins.RunawayProcessKiller.RunawayProcessKillerExtension" id="killOnStartup">
+      <pidfile>{{ x(jenkins_home) }}\jenkins.pid</pidfile>
+      <stopTimeout>10000</stopTimeout>
+      <stopParentFirst>false</stopParentFirst>
+    </extension>
+  </extensions>
+</service>

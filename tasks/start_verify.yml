@@ -34,7 +34,7 @@
 - name: Which java.exe / WAR is actually running?
   ansible.windows.win_powershell:
     script: |
-      $re = '-jar\s+"?[^\s"]*jenkins[^\s"]*\.war'
+      $re = '-jar\s+(?:"[^"]*jenkins[^"]*\.war"|[^\s"]*jenkins[^\s"]*\.war)'
       $p = @(Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" | Where-Object { $_.CommandLine -match $re })
       $Ansible.Result = @{ procs = @($p | ForEach-Object { @{ exe = $_.ExecutablePath; cmd = $_.CommandLine } }) }
   register: _running
